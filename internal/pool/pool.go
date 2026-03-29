@@ -1,19 +1,27 @@
-package main
+package pool
 
 import (
 	"net/url"
 	"sync/atomic"
+
+	"github.com/VijayGohel/go-lb/internal/backend"
 )
 
 // ServerPool holds registered backends and the round-robin counter.
 type ServerPool struct {
-	backends []*Backend
+	backends []*backend.Backend
 	current  uint64
 }
 
 // AddBackend registers a backend with the pool.
-func (s *ServerPool) AddBackend(backend *Backend) {
-	s.backends = append(s.backends, backend)
+func (s *ServerPool) AddBackend(b *backend.Backend) {
+	s.backends = append(s.backends, b)
+}
+
+// Backends returns a copy of all registered backends. Used by HealthChecker to iterate.
+// Callers must not modify the returned slice.
+func (s *ServerPool) Backends() []*backend.Backend {
+	return append([]*backend.Backend(nil), s.backends...)
 }
 
 // NextIndex atomically increments and wraps the counter.
@@ -28,7 +36,7 @@ func (s *ServerPool) NextIndex() int {
 
 // GetNextPeer returns the next alive backend using round-robin, skipping dead ones.
 // Returns nil if no backends are alive or the pool is empty.
-func (s *ServerPool) GetNextPeer() *Backend {
+func (s *ServerPool) GetNextPeer() *backend.Backend {
 	if len(s.backends) == 0 {
 		return nil
 	}

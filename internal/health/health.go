@@ -1,15 +1,19 @@
-package main
+package health
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/VijayGohel/go-lb/internal/backend"
+	"github.com/VijayGohel/go-lb/internal/pool"
 )
 
 // HealthChecker probes backend health on a configurable interval.
 type HealthChecker struct {
-	pool     *ServerPool
+	pool     *pool.ServerPool
 	path     string
 	interval time.Duration
 	timeout  time.Duration
@@ -18,12 +22,15 @@ type HealthChecker struct {
 
 // NewHealthChecker creates a HealthChecker. interval must be > 0; defaults to 10s if not.
 // timeout is the per-probe HTTP deadline.
-func NewHealthChecker(pool *ServerPool, path string, interval, timeout time.Duration) *HealthChecker {
+func NewHealthChecker(p *pool.ServerPool, path string, interval, timeout time.Duration) *HealthChecker {
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
 	return &HealthChecker{
-		pool:     pool,
+		pool:     p,
 		path:     path,
 		interval: interval,
 		timeout:  timeout,
@@ -31,16 +38,16 @@ func NewHealthChecker(pool *ServerPool, path string, interval, timeout time.Dura
 	}
 }
 
-// checkBackend performs a single HTTP health probe and updates Backend alive state.
+// CheckBackend performs a single HTTP health probe and updates the backend's alive state.
 // Only 2xx responses are considered healthy.
-func (hc *HealthChecker) checkBackend(ctx context.Context, b *Backend) {
+func (hc *HealthChecker) CheckBackend(ctx context.Context, b *backend.Backend) {
 	target := b.URL.String() + hc.path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		wasAlive := b.IsAlive()
 		b.SetAlive(false)
 		if wasAlive {
-			logger.Warn("backend_down", "backend", b.URL.String(), "error", err.Error())
+			slog.Warn("backend_down", "backend", b.URL.String(), "error", err.Error())
 		}
 		return
 	}
@@ -50,7 +57,7 @@ func (hc *HealthChecker) checkBackend(ctx context.Context, b *Backend) {
 		wasAlive := b.IsAlive()
 		b.SetAlive(false)
 		if wasAlive {
-			logger.Warn("backend_down", "backend", b.URL.String(), "error", err.Error())
+			slog.Warn("backend_down", "backend", b.URL.String(), "error", err.Error())
 		}
 		return
 	}
@@ -60,7 +67,7 @@ func (hc *HealthChecker) checkBackend(ctx context.Context, b *Backend) {
 		wasAlive := b.IsAlive()
 		b.SetAlive(false)
 		if wasAlive {
-			logger.Warn("backend_down", "backend", b.URL.String(), "error", "non-2xx response")
+			slog.Warn("backend_down", "backend", b.URL.String(), "error", "non-2xx response")
 		}
 		return
 	}
@@ -68,12 +75,12 @@ func (hc *HealthChecker) checkBackend(ctx context.Context, b *Backend) {
 	wasAlive := b.IsAlive()
 	b.SetAlive(true)
 	if !wasAlive {
-		logger.Info("backend_up", "backend", b.URL.String())
+		slog.Info("backend_up", "backend", b.URL.String())
 	}
 }
 
 // Start runs health checks on all pool backends every interval until ctx is cancelled.
-// Probes run concurrently per tick; Start waits for all to finish before the next tick.
+// Probes run concurrently per tick; Start waits for all probes before the next tick.
 func (hc *HealthChecker) Start(ctx context.Context) {
 	ticker := time.NewTicker(hc.interval)
 	defer ticker.Stop()
@@ -81,11 +88,11 @@ func (hc *HealthChecker) Start(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			var wg sync.WaitGroup
-			for _, b := range hc.pool.backends {
+			for _, b := range hc.pool.Backends() {
 				wg.Add(1)
-				go func(b *Backend) {
+				go func(b *backend.Backend) {
 					defer wg.Done()
-					hc.checkBackend(ctx, b)
+					hc.CheckBackend(ctx, b)
 				}(b)
 			}
 			wg.Wait()

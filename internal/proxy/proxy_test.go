@@ -1,29 +1,53 @@
-package main
+package proxy_test
 
 import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
+
+	"github.com/VijayGohel/go-lb/internal/backend"
+	"github.com/VijayGohel/go-lb/internal/pool"
+	"github.com/VijayGohel/go-lb/internal/proxy"
 )
 
+func mustParseURL(raw string) *url.URL {
+	u, err := url.Parse(raw)
+	if err != nil {
+		panic(err)
+	}
+	return u
+}
+
+func makeBackend(rawURL string, alive bool) *backend.Backend {
+	b := &backend.Backend{URL: mustParseURL(rawURL)}
+	b.SetAlive(alive)
+	return b
+}
+
+// newLB wires backends into a pool and returns a ready LoadBalancer.
+func newLB(backends ...*backend.Backend) *proxy.LoadBalancer {
+	p := &pool.ServerPool{}
+	lb := proxy.New(p)
+	for _, b := range backends {
+		lb.SetupProxy(b)
+		p.AddBackend(b)
+	}
+	return lb
+}
+
 func TestLb_ProxiesToAliveBackend(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer backend.Close()
+	defer srv.Close()
 
-	pool := &ServerPool{}
-	b := makeBackend(backend.URL, true)
-	setupProxy(b, pool)
-	pool.AddBackend(b)
-	serverPool = *pool
-
-	initLogger()
+	lb := newLB(makeBackend(srv.URL, true))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rw := httptest.NewRecorder()
-	lb(rw, req)
+	lb.ServeHTTP(rw, req)
 
 	if rw.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rw.Code)
@@ -31,14 +55,10 @@ func TestLb_ProxiesToAliveBackend(t *testing.T) {
 }
 
 func TestLb_Returns503_WhenNoBackendsAlive(t *testing.T) {
-	pool := &ServerPool{}
-	pool.AddBackend(makeBackend("http://localhost:19998", false))
-	serverPool = *pool
-
-	initLogger()
+	lb := newLB(makeBackend("http://localhost:19998", false))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rw := httptest.NewRecorder()
-	lb(rw, req)
+	lb.ServeHTTP(rw, req)
 
 	if rw.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", rw.Code)
@@ -57,24 +77,22 @@ func TestLb_RoundRobin(t *testing.T) {
 		defer backends[i].Close()
 	}
 
-	pool := &ServerPool{}
+	p := &pool.ServerPool{}
+	lb := proxy.New(p)
 	for _, srv := range backends {
 		b := makeBackend(srv.URL, true)
-		setupProxy(b, pool)
-		pool.AddBackend(b)
+		lb.SetupProxy(b)
+		p.AddBackend(b)
 	}
-	serverPool = *pool
-	initLogger()
 
 	for i := 0; i < 9; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		rw := httptest.NewRecorder()
-		lb(rw, req)
+		lb.ServeHTTP(rw, req)
 		if rw.Code != http.StatusOK {
 			t.Errorf("request %d: expected 200, got %d", i, rw.Code)
 		}
 	}
-
 	for i, h := range hits {
 		if h != 3 {
 			t.Errorf("backend %d got %d requests, want 3", i, h)
@@ -83,7 +101,6 @@ func TestLb_RoundRobin(t *testing.T) {
 }
 
 func TestLb_SwitchesBackend_OnFailure(t *testing.T) {
-	// Reserve a port and close it immediately to guarantee connection refused.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -96,21 +113,10 @@ func TestLb_SwitchesBackend_OnFailure(t *testing.T) {
 	}))
 	defer alive.Close()
 
-	pool := &ServerPool{}
-	dead := makeBackend(deadAddr, true)
-	setupProxy(dead, pool)
-	pool.AddBackend(dead)
-
-	b := makeBackend(alive.URL, true)
-	setupProxy(b, pool)
-	pool.AddBackend(b)
-
-	serverPool = *pool
-	initLogger()
-
+	lb := newLB(makeBackend(deadAddr, true), makeBackend(alive.URL, true))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rw := httptest.NewRecorder()
-	lb(rw, req)
+	lb.ServeHTTP(rw, req)
 
 	if rw.Code != http.StatusOK {
 		t.Errorf("expected 200 after switching to alive backend, got %d", rw.Code)
@@ -118,40 +124,43 @@ func TestLb_SwitchesBackend_OnFailure(t *testing.T) {
 }
 
 func TestLb_AllBackendsFail_Returns503(t *testing.T) {
-	var addrs []string
-	for i := 0; i < maxBackendSwitches; i++ {
+	var deadBackends []*backend.Backend
+	for i := 0; i < proxy.MaxBackendSwitches; i++ {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
 		}
-		addrs = append(addrs, "http://"+ln.Addr().String())
+		deadBackends = append(deadBackends, makeBackend("http://"+ln.Addr().String(), true))
 		ln.Close()
 	}
 
-	pool := &ServerPool{}
-	for _, addr := range addrs {
-		b := makeBackend(addr, true)
-		setupProxy(b, pool)
-		pool.AddBackend(b)
-	}
-	serverPool = *pool
-	initLogger()
-
+	lb := newLB(deadBackends...)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rw := httptest.NewRecorder()
-	lb(rw, req)
+	lb.ServeHTTP(rw, req)
 
 	if rw.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 when all backends fail, got %d", rw.Code)
 	}
 }
 
-func TestResponseWriter_CapturesStatusCode(t *testing.T) {
-	inner := httptest.NewRecorder()
-	rw := &responseWriter{ResponseWriter: inner, statusCode: http.StatusOK}
-	rw.WriteHeader(http.StatusCreated)
+func TestLb_DeadBackendSkipped(t *testing.T) {
+	alive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer alive.Close()
 
-	if rw.statusCode != http.StatusCreated {
-		t.Errorf("statusCode = %d, want 201", rw.statusCode)
+	lb := newLB(
+		makeBackend("http://localhost:19997", false),
+		makeBackend(alive.URL, true),
+	)
+
+	for i := 0; i < 4; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rw := httptest.NewRecorder()
+		lb.ServeHTTP(rw, req)
+		if rw.Code != http.StatusOK {
+			t.Errorf("request %d: expected 200, got %d — dead backend not skipped", i, rw.Code)
+		}
 	}
 }

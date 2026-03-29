@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -11,6 +12,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/VijayGohel/go-lb/internal/backend"
+	"github.com/VijayGohel/go-lb/internal/health"
+	"github.com/VijayGohel/go-lb/internal/logger"
+	"github.com/VijayGohel/go-lb/internal/pool"
+	"github.com/VijayGohel/go-lb/internal/proxy"
 )
 
 type config struct {
@@ -51,61 +58,64 @@ func parseFlags(args []string) config {
 
 func main() {
 	cfg := parseFlags(os.Args[1:])
-	initLogger()
+	logger.Init()
 
 	if len(cfg.backends) == 0 {
-		logger.Error("no backends provided — use --backends=http://host:port,...")
+		slog.Error("no backends provided — use --backends=http://host:port,...")
 		os.Exit(1)
 	}
+
+	p := &pool.ServerPool{}
+	lb := proxy.New(p)
 
 	for _, rawURL := range cfg.backends {
 		u, err := url.Parse(rawURL)
 		if err != nil {
-			logger.Error("invalid backend URL", "url", rawURL, "error", err)
+			slog.Error("invalid backend URL", "url", rawURL, "error", err)
 			os.Exit(1)
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
-			logger.Error("backend URL must use http or https scheme", "url", rawURL)
+			slog.Error("backend URL must use http or https scheme", "url", rawURL)
 			os.Exit(1)
 		}
 		if u.Host == "" {
-			logger.Error("backend URL must include a host", "url", rawURL)
+			slog.Error("backend URL must include a host", "url", rawURL)
 			os.Exit(1)
 		}
-		b := &Backend{URL: u}
+		b := &backend.Backend{URL: u}
 		b.SetAlive(true)
-		setupProxy(b, &serverPool)
-		serverPool.AddBackend(b)
-		logger.Info("registered backend", "url", u.String())
+		lb.SetupProxy(b)
+		p.AddBackend(b)
+		slog.Info("registered backend", "url", u.String())
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	hc := NewHealthChecker(&serverPool, cfg.healthPath, cfg.healthInterval, cfg.healthTimeout)
+	hc := health.NewHealthChecker(p, cfg.healthPath, cfg.healthInterval, cfg.healthTimeout)
 	go hc.Start(ctx)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.port),
-		Handler: http.HandlerFunc(lb),
+		Handler: lb,
 	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-quit
-		logger.Info("shutting down gracefully")
+		slog.Info("shutting down gracefully")
 		cancel()
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer shutCancel()
 		if err := srv.Shutdown(shutCtx); err != nil {
-			logger.Error("shutdown error", "error", err)
+			slog.Error("shutdown error", "error", err)
 		}
 	}()
 
-	logger.Info("golb started", "port", cfg.port, "backends", len(serverPool.backends))
+	slog.Info("golb started", "port", cfg.port, "backends", len(p.Backends()))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Error("server error", "error", err)
+		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}
 }

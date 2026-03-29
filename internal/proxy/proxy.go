@@ -1,28 +1,34 @@
-package main
+package proxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"time"
+
+	"github.com/VijayGohel/go-lb/internal/backend"
+	"github.com/VijayGohel/go-lb/internal/pool"
 )
 
 const (
-	maxRetries         = 3 // per-backend retries before marking it dead and switching
-	maxBackendSwitches = 3 // total backend switches allowed per request
+	// MaxBackendSwitches is the maximum number of backend switches allowed per request.
+	MaxBackendSwitches = 3
+	maxRetries         = 3 // per-backend retries before marking dead and switching
 )
 
-// idempotentMethods are safe to retry — their bodies are not consumed on the first attempt
-// in a way that would corrupt a retry, and repeating them has no side effects.
+// idempotentMethods are safe to retry — repeating them has no observable side effects.
 var idempotentMethods = map[string]bool{
 	http.MethodGet:     true,
 	http.MethodHead:    true,
 	http.MethodOptions: true,
 }
 
-// Context keys for per-request retry tracking.
+// contextKey is a private type for context values to avoid collisions.
 type contextKey int
 
 const (
@@ -31,11 +37,17 @@ const (
 	requestIDKey                   // stable ID propagated across backend switches
 )
 
-// serverPool is the package-level pool used by the lb handler.
-// Initialised in main(). Proxy tests set it directly.
-var serverPool ServerPool
+// LoadBalancer routes requests across a pool of backends using round-robin with retry.
+// It implements http.Handler.
+type LoadBalancer struct {
+	pool *pool.ServerPool
+}
 
-// getAttemptsFromContext returns how many backend switches have occurred (0 = first backend).
+// New creates a LoadBalancer backed by the given pool.
+func New(p *pool.ServerPool) *LoadBalancer {
+	return &LoadBalancer{pool: p}
+}
+
 func getAttemptsFromContext(r *http.Request) int {
 	if v, ok := r.Context().Value(attemptsKey).(int); ok {
 		return v
@@ -43,7 +55,6 @@ func getAttemptsFromContext(r *http.Request) int {
 	return 0
 }
 
-// getRetryFromContext returns how many retries on the current backend have happened.
 func getRetryFromContext(r *http.Request) int {
 	if v, ok := r.Context().Value(retryKey).(int); ok {
 		return v
@@ -59,37 +70,38 @@ func getOrCreateRequestID(r *http.Request) string {
 	}
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		logger.Warn("rand_read_failed", "error", err.Error())
+		slog.Warn("rand_read_failed", "error", err.Error())
 		return fmt.Sprintf("ts-%d", time.Now().UnixNano())
 	}
 	return fmt.Sprintf("%x", b)
 }
 
-// setupProxy attaches an error handler to the backend's ReverseProxy.
-// Call this for every backend after creating it.
-func setupProxy(b *Backend, pool *ServerPool) {
+// SetupProxy attaches a retry-aware error handler to the backend's ReverseProxy.
+// Call this for every backend before adding it to the pool.
+func (lb *LoadBalancer) SetupProxy(b *backend.Backend) {
 	proxy := httputil.NewSingleHostReverseProxy(b.URL)
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, e error) {
 		retry := getRetryFromContext(r)
 		if retry < maxRetries && idempotentMethods[r.Method] {
+			timer := time.NewTimer(10 * time.Millisecond)
 			select {
-			case <-time.After(10 * time.Millisecond):
+			case <-timer.C:
 				ctx := context.WithValue(r.Context(), retryKey, retry+1)
 				proxy.ServeHTTP(w, r.WithContext(ctx))
 			case <-r.Context().Done():
+				timer.Stop()
 				return
 			}
 			return
 		}
-		pool.MarkBackendStatus(b.URL, false)
-		logger.Warn("backend_down", "backend", b.URL.String(), "error", e.Error())
+		lb.pool.MarkBackendStatus(b.URL, false)
+		slog.Warn("backend_down", "backend", b.URL.String(), "error", e.Error())
 
 		attempts := getAttemptsFromContext(r)
-		if attempts < maxBackendSwitches {
-			// Reset retryKey so the next backend gets its own retry budget.
+		if attempts < MaxBackendSwitches {
 			ctx := context.WithValue(r.Context(), attemptsKey, attempts+1)
 			ctx = context.WithValue(ctx, retryKey, 0)
-			lb(w, r.WithContext(ctx))
+			lb.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 		http.Error(w, "Service not available", http.StatusServiceUnavailable)
@@ -97,21 +109,20 @@ func setupProxy(b *Backend, pool *ServerPool) {
 	b.ReverseProxy = proxy
 }
 
-// lb is the main load balancer HTTP handler.
-func lb(w http.ResponseWriter, r *http.Request) {
+// ServeHTTP picks the next alive backend and forwards the request.
+// It implements http.Handler.
+func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	attempts := getAttemptsFromContext(r)
-	if attempts >= maxBackendSwitches {
+	if attempts >= MaxBackendSwitches {
 		http.Error(w, "Service not available", http.StatusServiceUnavailable)
 		return
 	}
-	peer := serverPool.GetNextPeer()
+	peer := lb.pool.GetNextPeer()
 	if peer == nil {
 		http.Error(w, "Service not available", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Propagate a stable request_id across backend switches so all log entries
-	// for the same original request share the same ID.
 	requestID := getOrCreateRequestID(r)
 	if _, ok := r.Context().Value(requestIDKey).(string); !ok {
 		r = r.WithContext(context.WithValue(r.Context(), requestIDKey, requestID))
@@ -120,7 +131,7 @@ func lb(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 	peer.ReverseProxy.ServeHTTP(rw, r)
-	logger.Info("request",
+	slog.Info("request",
 		"request_id", requestID,
 		"backend", peer.URL.String(),
 		"latency_ms", time.Since(start).Milliseconds(),
@@ -130,6 +141,8 @@ func lb(w http.ResponseWriter, r *http.Request) {
 }
 
 // responseWriter wraps http.ResponseWriter to capture the status code for logging.
+// It forwards optional interfaces (Flusher, Hijacker) so streaming and WebSocket
+// upgrades continue to work through the reverse proxy.
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -138,4 +151,17 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
 }

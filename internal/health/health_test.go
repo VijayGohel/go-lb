@@ -71,7 +71,9 @@ func TestHealthChecker_MarksBackendDead_OnConnectionRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	addr := "http://" + ln.Addr().String()
-	ln.Close()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	p := &pool.ServerPool{}
 	b := makeBackend(addr, true)

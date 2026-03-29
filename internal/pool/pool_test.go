@@ -32,9 +32,10 @@ func TestServerPool_GetNextPeer_RoundRobin(t *testing.T) {
 	for i := 0; i < 9; i++ {
 		peer := p.GetNextPeer()
 		if peer == nil {
-			t.Fatal("GetNextPeer returned nil with alive backends")
+			t.Fatalf("iteration %d: GetNextPeer returned nil with alive backends", i)
+		} else {
+			seen[peer.URL.String()]++
 		}
-		seen[peer.URL.String()]++
 	}
 	for u, count := range seen {
 		if count != 3 {
@@ -53,8 +54,7 @@ func TestServerPool_GetNextPeer_SkipsDeadBackends(t *testing.T) {
 		peer := p.GetNextPeer()
 		if peer == nil {
 			t.Fatal("GetNextPeer returned nil when one backend is alive")
-		}
-		if peer.URL.String() != "http://localhost:8082" {
+		} else if peer.URL.String() != "http://localhost:8082" {
 			t.Errorf("expected only alive backend, got %s", peer.URL.String())
 		}
 	}

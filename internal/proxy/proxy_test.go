@@ -106,7 +106,9 @@ func TestLb_SwitchesBackend_OnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	deadAddr := "http://" + ln.Addr().String()
-	ln.Close()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	alive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -131,7 +133,9 @@ func TestLb_AllBackendsFail_Returns503(t *testing.T) {
 			t.Fatal(err)
 		}
 		deadBackends = append(deadBackends, makeBackend("http://"+ln.Addr().String(), true))
-		ln.Close()
+		if err := ln.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	lb := newLB(deadBackends...)

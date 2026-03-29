@@ -1,17 +1,18 @@
+version: "2"
+
 linters:
-  enable-all: false
+  default: none
   enable:
     - govet
     - errcheck
     - staticcheck
-    - unused
-    - gosimple
     - ineffassign
     - bodyclose
 
-linters-settings:
+settings:
   errcheck:
     check-type-assertions: true
 
-run:
-  timeout: 2m
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

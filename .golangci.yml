@@ -1,0 +1,17 @@
+linters:
+  enable-all: false
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - gosimple
+    - ineffassign
+    - bodyclose
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+
+run:
+  timeout: 2m

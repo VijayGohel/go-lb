@@ -5,8 +5,9 @@ import (
 	"os"
 )
 
-// logger is the package-level structured logger. Initialised by initLogger().
-var logger *slog.Logger
+// logger is the package-level structured logger. Defaults to slog.Default();
+// call initLogger() to switch to a JSON handler writing to stdout.
+var logger = slog.Default()
 
 // initLogger sets up a JSON structured logger writing to stdout
 // and registers it as the slog default.

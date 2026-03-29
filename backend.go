@@ -7,10 +7,10 @@ import (
 )
 
 // Backend holds state for a single backend server.
-// Public fields and methods are frozen — see Interface Contracts.md before renaming.
+// Access alive status only through SetAlive/IsAlive — never read the field directly.
 type Backend struct {
 	URL          *url.URL
-	Alive        bool
+	alive        bool
 	mux          sync.RWMutex
 	ReverseProxy *httputil.ReverseProxy
 }
@@ -18,14 +18,14 @@ type Backend struct {
 // SetAlive updates the alive status thread-safely.
 func (b *Backend) SetAlive(alive bool) {
 	b.mux.Lock()
-	b.Alive = alive
+	b.alive = alive
 	b.mux.Unlock()
 }
 
 // IsAlive returns the current alive status thread-safely.
 func (b *Backend) IsAlive() (alive bool) {
 	b.mux.RLock()
-	alive = b.Alive
+	alive = b.alive
 	b.mux.RUnlock()
 	return
 }

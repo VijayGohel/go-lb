@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestInitLogger_OutputsJSON(t *testing.T) {
+func TestJSONHandler_OutputsValidJSON(t *testing.T) {
 	var buf bytes.Buffer
 	testLogger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{
 		Level: slog.LevelInfo,

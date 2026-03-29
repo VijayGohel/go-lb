@@ -1,7 +1,6 @@
 package main
 
 import (
-	"net/url"
 	"testing"
 )
 
@@ -74,7 +73,3 @@ func TestServerPool_MarkBackendStatus(t *testing.T) {
 	}
 }
 
-func mustParseURL2(raw string) *url.URL {
-	u, _ := url.Parse(raw)
-	return u
-}

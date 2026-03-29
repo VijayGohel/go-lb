@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -92,13 +93,13 @@ func TestIntegration_HealthChecker_RecoverDeadBackend(t *testing.T) {
 	initLogger()
 	hc := NewHealthChecker(pool, "/health", 100*time.Millisecond, time.Second)
 
-	hc.checkBackend(b)
+	hc.checkBackend(context.Background(), b)
 	if b.IsAlive() {
 		t.Fatal("backend should be dead when returning 500")
 	}
 
 	healthy.Store(true)
-	hc.checkBackend(b)
+	hc.checkBackend(context.Background(), b)
 
 	if !b.IsAlive() {
 		t.Fatal("backend should recover to alive after 200 health check")

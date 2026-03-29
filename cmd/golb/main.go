@@ -1,0 +1,121 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/VijayGohel/go-lb/internal/backend"
+	"github.com/VijayGohel/go-lb/internal/health"
+	"github.com/VijayGohel/go-lb/internal/logger"
+	"github.com/VijayGohel/go-lb/internal/pool"
+	"github.com/VijayGohel/go-lb/internal/proxy"
+)
+
+type config struct {
+	backends       []string
+	port           int
+	healthPath     string
+	healthInterval time.Duration
+	healthTimeout  time.Duration
+}
+
+// parseFlags parses the given args into a config.
+// Extracted from main() for testability.
+func parseFlags(args []string) config {
+	fs := flag.NewFlagSet("golb", flag.ContinueOnError)
+	var backendList string
+	var cfg config
+
+	fs.StringVar(&backendList, "backends", "", "Comma-separated backend URLs")
+	fs.IntVar(&cfg.port, "port", 3030, "Port to listen on")
+	fs.StringVar(&cfg.healthPath, "health-path", "/health", "Health check path")
+	fs.DurationVar(&cfg.healthInterval, "health-interval", 10*time.Second, "Health check interval")
+	fs.DurationVar(&cfg.healthTimeout, "health-timeout", 2*time.Second, "Health check timeout")
+
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+
+	if backendList != "" {
+		for _, b := range strings.Split(backendList, ",") {
+			if b = strings.TrimSpace(b); b != "" {
+				cfg.backends = append(cfg.backends, b)
+			}
+		}
+	}
+	return cfg
+}
+
+func main() {
+	cfg := parseFlags(os.Args[1:])
+	logger.Init()
+
+	if len(cfg.backends) == 0 {
+		slog.Error("no backends provided — use --backends=http://host:port,...")
+		os.Exit(1)
+	}
+
+	p := &pool.ServerPool{}
+	lb := proxy.New(p)
+
+	for _, rawURL := range cfg.backends {
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			slog.Error("invalid backend URL", "url", rawURL, "error", err)
+			os.Exit(1)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			slog.Error("backend URL must use http or https scheme", "url", rawURL)
+			os.Exit(1)
+		}
+		if u.Host == "" {
+			slog.Error("backend URL must include a host", "url", rawURL)
+			os.Exit(1)
+		}
+		b := &backend.Backend{URL: u}
+		b.SetAlive(true)
+		lb.SetupProxy(b)
+		p.AddBackend(b)
+		slog.Info("registered backend", "url", u.String())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	hc := health.NewHealthChecker(p, cfg.healthPath, cfg.healthInterval, cfg.healthTimeout)
+	go hc.Start(ctx)
+
+	srv := &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.port),
+		Handler: lb,
+	}
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-quit
+		slog.Info("shutting down gracefully")
+		cancel()
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutCancel()
+		if err := srv.Shutdown(shutCtx); err != nil {
+			slog.Error("shutdown error", "error", err)
+		}
+	}()
+
+	slog.Info("golb started", "port", cfg.port, "backends", len(p.Backends()))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Error("server error", "error", err)
+		os.Exit(1)
+	}
+}

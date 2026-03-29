@@ -9,24 +9,38 @@ import (
 	"time"
 )
 
+const (
+	maxRetries         = 3 // per-backend retries before marking it dead and switching
+	maxBackendSwitches = 3 // total backend switches allowed per request
+)
+
+// idempotentMethods are safe to retry — their bodies are not consumed on the first attempt
+// in a way that would corrupt a retry, and repeating them has no side effects.
+var idempotentMethods = map[string]bool{
+	http.MethodGet:     true,
+	http.MethodHead:    true,
+	http.MethodOptions: true,
+}
+
 // Context keys for per-request retry tracking.
 type contextKey int
 
 const (
-	attemptsKey contextKey = iota
-	retryKey
+	attemptsKey  contextKey = iota // number of backend switches so far (0-based)
+	retryKey                       // number of retries on the current backend
+	requestIDKey                   // stable ID propagated across backend switches
 )
 
 // serverPool is the package-level pool used by the lb handler.
 // Initialised in main(). Proxy tests set it directly.
 var serverPool ServerPool
 
-// getAttemptsFromContext returns how many full backend switches have happened.
+// getAttemptsFromContext returns how many backend switches have occurred (0 = first backend).
 func getAttemptsFromContext(r *http.Request) int {
 	if v, ok := r.Context().Value(attemptsKey).(int); ok {
 		return v
 	}
-	return 1
+	return 0
 }
 
 // getRetryFromContext returns how many retries on the current backend have happened.
@@ -37,13 +51,27 @@ func getRetryFromContext(r *http.Request) int {
 	return 0
 }
 
+// getOrCreateRequestID returns the stable request ID from context, creating one if absent.
+// Falls back to a timestamp-based ID if crypto/rand fails.
+func getOrCreateRequestID(r *http.Request) string {
+	if id, ok := r.Context().Value(requestIDKey).(string); ok {
+		return id
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		logger.Warn("rand_read_failed", "error", err.Error())
+		return fmt.Sprintf("ts-%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%x", b)
+}
+
 // setupProxy attaches an error handler to the backend's ReverseProxy.
 // Call this for every backend after creating it.
 func setupProxy(b *Backend, pool *ServerPool) {
 	proxy := httputil.NewSingleHostReverseProxy(b.URL)
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, e error) {
 		retry := getRetryFromContext(r)
-		if retry < 3 {
+		if retry < maxRetries && idempotentMethods[r.Method] {
 			select {
 			case <-time.After(10 * time.Millisecond):
 				ctx := context.WithValue(r.Context(), retryKey, retry+1)
@@ -57,8 +85,8 @@ func setupProxy(b *Backend, pool *ServerPool) {
 		logger.Warn("backend_down", "backend", b.URL.String(), "error", e.Error())
 
 		attempts := getAttemptsFromContext(r)
-		if attempts < 3 {
-			// Reset retryKey so the next backend gets its own 3 retries.
+		if attempts < maxBackendSwitches {
+			// Reset retryKey so the next backend gets its own retry budget.
 			ctx := context.WithValue(r.Context(), attemptsKey, attempts+1)
 			ctx = context.WithValue(ctx, retryKey, 0)
 			lb(w, r.WithContext(ctx))
@@ -71,7 +99,8 @@ func setupProxy(b *Backend, pool *ServerPool) {
 
 // lb is the main load balancer HTTP handler.
 func lb(w http.ResponseWriter, r *http.Request) {
-	if getAttemptsFromContext(r) > 3 {
+	attempts := getAttemptsFromContext(r)
+	if attempts >= maxBackendSwitches {
 		http.Error(w, "Service not available", http.StatusServiceUnavailable)
 		return
 	}
@@ -81,9 +110,12 @@ func lb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var b [8]byte
-	rand.Read(b[:])
-	requestID := fmt.Sprintf("%x", b)
+	// Propagate a stable request_id across backend switches so all log entries
+	// for the same original request share the same ID.
+	requestID := getOrCreateRequestID(r)
+	if _, ok := r.Context().Value(requestIDKey).(string); !ok {
+		r = r.WithContext(context.WithValue(r.Context(), requestIDKey, requestID))
+	}
 
 	start := time.Now()
 	rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
@@ -93,7 +125,7 @@ func lb(w http.ResponseWriter, r *http.Request) {
 		"backend", peer.URL.String(),
 		"latency_ms", time.Since(start).Milliseconds(),
 		"status", rw.statusCode,
-		"attempt", getAttemptsFromContext(r),
+		"attempt", attempts+1,
 	)
 }
 

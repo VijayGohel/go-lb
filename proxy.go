@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"net/http/httputil"
 	"time"
@@ -48,6 +48,8 @@ func setupProxy(b *Backend, pool *ServerPool) {
 			case <-time.After(10 * time.Millisecond):
 				ctx := context.WithValue(r.Context(), retryKey, retry+1)
 				proxy.ServeHTTP(w, r.WithContext(ctx))
+			case <-r.Context().Done():
+				return
 			}
 			return
 		}
@@ -56,7 +58,9 @@ func setupProxy(b *Backend, pool *ServerPool) {
 
 		attempts := getAttemptsFromContext(r)
 		if attempts < 3 {
+			// Reset retryKey so the next backend gets its own 3 retries.
 			ctx := context.WithValue(r.Context(), attemptsKey, attempts+1)
+			ctx = context.WithValue(ctx, retryKey, 0)
 			lb(w, r.WithContext(ctx))
 			return
 		}
@@ -77,7 +81,10 @@ func lb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestID := fmt.Sprintf("%x", rand.Int63())
+	var b [8]byte
+	rand.Read(b[:])
+	requestID := fmt.Sprintf("%x", b)
+
 	start := time.Now()
 	rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 	peer.ReverseProxy.ServeHTTP(rw, r)

@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"time"
@@ -81,11 +83,13 @@ func (lb *LoadBalancer) SetupProxy(b *backend.Backend) {
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, e error) {
 		retry := getRetryFromContext(r)
 		if retry < maxRetries && idempotentMethods[r.Method] {
+			timer := time.NewTimer(10 * time.Millisecond)
 			select {
-			case <-time.After(10 * time.Millisecond):
+			case <-timer.C:
 				ctx := context.WithValue(r.Context(), retryKey, retry+1)
 				proxy.ServeHTTP(w, r.WithContext(ctx))
 			case <-r.Context().Done():
+				timer.Stop()
 				return
 			}
 			return
@@ -137,6 +141,8 @@ func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // responseWriter wraps http.ResponseWriter to capture the status code for logging.
+// It forwards optional interfaces (Flusher, Hijacker) so streaming and WebSocket
+// upgrades continue to work through the reverse proxy.
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -145,4 +151,17 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
 }

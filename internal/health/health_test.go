@@ -16,7 +16,10 @@ import (
 )
 
 func makeBackend(rawURL string, alive bool) *backend.Backend {
-	u, _ := url.Parse(rawURL)
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		panic(err)
+	}
 	b := &backend.Backend{URL: u}
 	b.SetAlive(alive)
 	return b

@@ -26,6 +26,9 @@ func NewHealthChecker(p *pool.ServerPool, path string, interval, timeout time.Du
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
 	return &HealthChecker{
 		pool:     p,
 		path:     path,

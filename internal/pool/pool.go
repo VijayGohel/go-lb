@@ -18,9 +18,10 @@ func (s *ServerPool) AddBackend(b *backend.Backend) {
 	s.backends = append(s.backends, b)
 }
 
-// Backends returns all registered backends. Used by HealthChecker to iterate.
+// Backends returns a copy of all registered backends. Used by HealthChecker to iterate.
+// Callers must not modify the returned slice.
 func (s *ServerPool) Backends() []*backend.Backend {
-	return s.backends
+	return append([]*backend.Backend(nil), s.backends...)
 }
 
 // NextIndex atomically increments and wraps the counter.

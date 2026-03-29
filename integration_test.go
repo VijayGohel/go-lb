@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -104,5 +103,5 @@ func TestIntegration_HealthChecker_RecoverDeadBackend(t *testing.T) {
 	if !b.IsAlive() {
 		t.Fatal("backend should recover to alive after 200 health check")
 	}
-	fmt.Println("backend recovered successfully")
+	t.Log("backend recovered successfully")
 }

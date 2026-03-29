@@ -34,7 +34,10 @@ func parseFlags(args []string) config {
 	fs.DurationVar(&cfg.healthInterval, "health-interval", 10*time.Second, "Health check interval")
 	fs.DurationVar(&cfg.healthTimeout, "health-timeout", 2*time.Second, "Health check timeout")
 
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 
 	if backendList != "" {
 		for _, b := range strings.Split(backendList, ",") {
@@ -59,6 +62,14 @@ func main() {
 		u, err := url.Parse(rawURL)
 		if err != nil {
 			logger.Error("invalid backend URL", "url", rawURL, "error", err)
+			os.Exit(1)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			logger.Error("backend URL must use http or https scheme", "url", rawURL)
+			os.Exit(1)
+		}
+		if u.Host == "" {
+			logger.Error("backend URL must include a host", "url", rawURL)
 			os.Exit(1)
 		}
 		b := &Backend{URL: u}

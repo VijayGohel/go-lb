@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/VijayGohel/go-lb/internal/algo"
 	"github.com/VijayGohel/go-lb/internal/backend"
 	"github.com/VijayGohel/go-lb/internal/pool"
 	"github.com/VijayGohel/go-lb/internal/proxy"
@@ -22,15 +23,16 @@ func mustParseURL(raw string) *url.URL {
 }
 
 func makeBackend(rawURL string, alive bool) *backend.Backend {
-	b := &backend.Backend{URL: mustParseURL(rawURL)}
+	b := &backend.Backend{URL: mustParseURL(rawURL), Weight: 1}
 	b.SetAlive(alive)
 	return b
 }
 
-// newLB wires backends into a pool and returns a ready LoadBalancer.
+// newLB wires backends into a pool with round-robin and returns a ready LoadBalancer.
 func newLB(backends ...*backend.Backend) *proxy.LoadBalancer {
 	p := &pool.ServerPool{}
-	lb := proxy.New(p)
+	rr, _ := algo.New("round_robin")
+	lb := proxy.New(p, rr)
 	for _, b := range backends {
 		lb.SetupProxy(b)
 		p.AddBackend(b)
@@ -78,7 +80,8 @@ func TestLb_RoundRobin(t *testing.T) {
 	}
 
 	p := &pool.ServerPool{}
-	lb := proxy.New(p)
+	rr, _ := algo.New("round_robin")
+	lb := proxy.New(p, rr)
 	for _, srv := range backends {
 		b := makeBackend(srv.URL, true)
 		lb.SetupProxy(b)

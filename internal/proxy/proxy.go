@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"time"
 
+	"github.com/VijayGohel/go-lb/internal/algo"
 	"github.com/VijayGohel/go-lb/internal/backend"
 	"github.com/VijayGohel/go-lb/internal/pool"
 )
@@ -37,15 +38,16 @@ const (
 	requestIDKey                   // stable ID propagated across backend switches
 )
 
-// LoadBalancer routes requests across a pool of backends using round-robin with retry.
+// LoadBalancer routes requests across a pool of backends using the configured algorithm.
 // It implements http.Handler.
 type LoadBalancer struct {
 	pool *pool.ServerPool
+	algo algo.Algorithm
 }
 
-// New creates a LoadBalancer backed by the given pool.
-func New(p *pool.ServerPool) *LoadBalancer {
-	return &LoadBalancer{pool: p}
+// New creates a LoadBalancer backed by the given pool and algorithm.
+func New(p *pool.ServerPool, a algo.Algorithm) *LoadBalancer {
+	return &LoadBalancer{pool: p, algo: a}
 }
 
 func getAttemptsFromContext(r *http.Request) int {
@@ -109,7 +111,8 @@ func (lb *LoadBalancer) SetupProxy(b *backend.Backend) {
 	b.ReverseProxy = proxy
 }
 
-// ServeHTTP picks the next alive backend and forwards the request.
+// ServeHTTP picks the next backend via the algorithm and forwards the request.
+// It tracks active connections per backend for the least-connections algorithm.
 // It implements http.Handler.
 func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	attempts := getAttemptsFromContext(r)
@@ -117,11 +120,14 @@ func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Service not available", http.StatusServiceUnavailable)
 		return
 	}
-	peer := lb.pool.GetNextPeer()
+	peer := lb.algo.Next(lb.pool.Backends())
 	if peer == nil {
 		http.Error(w, "Service not available", http.StatusServiceUnavailable)
 		return
 	}
+
+	peer.IncrConns()
+	defer peer.DecrConns()
 
 	requestID := getOrCreateRequestID(r)
 	if _, ok := r.Context().Value(requestIDKey).(string); !ok {

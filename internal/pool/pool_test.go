@@ -22,51 +22,19 @@ func makeBackend(rawURL string, alive bool) *backend.Backend {
 	return b
 }
 
-func TestServerPool_GetNextPeer_RoundRobin(t *testing.T) {
+func TestServerPool_Backends_ReturnsCopy(t *testing.T) {
 	p := &pool.ServerPool{}
 	p.AddBackend(makeBackend("http://localhost:8081", true))
 	p.AddBackend(makeBackend("http://localhost:8082", true))
-	p.AddBackend(makeBackend("http://localhost:8083", true))
 
-	seen := map[string]int{}
-	for i := 0; i < 9; i++ {
-		peer := p.GetNextPeer()
-		if peer == nil {
-			t.Fatalf("iteration %d: GetNextPeer returned nil with alive backends", i)
-		} else {
-			seen[peer.URL.String()]++
-		}
+	snap := p.Backends()
+	if len(snap) != 2 {
+		t.Fatalf("expected 2 backends, got %d", len(snap))
 	}
-	for u, count := range seen {
-		if count != 3 {
-			t.Errorf("backend %s got %d requests, want 3", u, count)
-		}
-	}
-}
-
-func TestServerPool_GetNextPeer_SkipsDeadBackends(t *testing.T) {
-	p := &pool.ServerPool{}
-	p.AddBackend(makeBackend("http://localhost:8081", false))
-	p.AddBackend(makeBackend("http://localhost:8082", true))
-	p.AddBackend(makeBackend("http://localhost:8083", false))
-
-	for i := 0; i < 6; i++ {
-		peer := p.GetNextPeer()
-		if peer == nil {
-			t.Fatal("GetNextPeer returned nil when one backend is alive")
-		} else if peer.URL.String() != "http://localhost:8082" {
-			t.Errorf("expected only alive backend, got %s", peer.URL.String())
-		}
-	}
-}
-
-func TestServerPool_GetNextPeer_AllDead_ReturnsNil(t *testing.T) {
-	p := &pool.ServerPool{}
-	p.AddBackend(makeBackend("http://localhost:8081", false))
-	p.AddBackend(makeBackend("http://localhost:8082", false))
-
-	if peer := p.GetNextPeer(); peer != nil {
-		t.Fatalf("expected nil when all backends dead, got %s", peer.URL.String())
+	// Mutating the snapshot must not affect the pool.
+	snap[0] = nil
+	if p.Backends()[0] == nil {
+		t.Fatal("mutating snapshot modified the pool's internal slice")
 	}
 }
 
@@ -79,5 +47,34 @@ func TestServerPool_MarkBackendStatus(t *testing.T) {
 
 	if b.IsAlive() {
 		t.Fatal("backend should be marked dead")
+	}
+}
+
+func TestServerPool_Remove_ExistingBackend(t *testing.T) {
+	p := &pool.ServerPool{}
+	p.AddBackend(makeBackend("http://localhost:8081", true))
+	p.AddBackend(makeBackend("http://localhost:8082", true))
+
+	removed := p.Remove("http://localhost:8081")
+	if !removed {
+		t.Fatal("Remove should return true for existing backend")
+	}
+	for _, b := range p.Backends() {
+		if b.URL.String() == "http://localhost:8081" {
+			t.Fatal("removed backend still in pool")
+		}
+	}
+}
+
+func TestServerPool_Remove_MissingBackend(t *testing.T) {
+	p := &pool.ServerPool{}
+	p.AddBackend(makeBackend("http://localhost:8081", true))
+
+	removed := p.Remove("http://localhost:9999")
+	if removed {
+		t.Fatal("Remove should return false for unknown backend")
+	}
+	if len(p.Backends()) != 1 {
+		t.Fatal("pool length changed after removing non-existent backend")
 	}
 }

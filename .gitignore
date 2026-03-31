@@ -1,2 +1,2 @@
-golb
-go-lb
+bin/*
+!bin/.gitkeep

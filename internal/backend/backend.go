@@ -4,13 +4,16 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"sync"
+	"sync/atomic"
 )
 
 // Backend holds state for a single backend server.
 // Access alive status only through SetAlive/IsAlive — never read the field directly.
 type Backend struct {
 	URL          *url.URL
+	Weight       int
 	alive        bool
+	activeConns  int64
 	mux          sync.RWMutex
 	ReverseProxy *httputil.ReverseProxy
 }
@@ -28,4 +31,19 @@ func (b *Backend) IsAlive() (alive bool) {
 	alive = b.alive
 	b.mux.RUnlock()
 	return
+}
+
+// IncrConns atomically increments the active connection count.
+func (b *Backend) IncrConns() {
+	atomic.AddInt64(&b.activeConns, 1)
+}
+
+// DecrConns atomically decrements the active connection count.
+func (b *Backend) DecrConns() {
+	atomic.AddInt64(&b.activeConns, -1)
+}
+
+// ActiveConns returns the current active connection count.
+func (b *Backend) ActiveConns() int64 {
+	return atomic.LoadInt64(&b.activeConns)
 }

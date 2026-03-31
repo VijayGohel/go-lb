@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,91 +12,134 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/VijayGohel/go-lb/internal/admin"
+	"github.com/VijayGohel/go-lb/internal/algo"
 	"github.com/VijayGohel/go-lb/internal/backend"
+	"github.com/VijayGohel/go-lb/internal/config"
 	"github.com/VijayGohel/go-lb/internal/health"
 	"github.com/VijayGohel/go-lb/internal/logger"
 	"github.com/VijayGohel/go-lb/internal/pool"
 	"github.com/VijayGohel/go-lb/internal/proxy"
 )
 
-type config struct {
-	backends       []string
-	port           int
-	healthPath     string
-	healthInterval time.Duration
-	healthTimeout  time.Duration
-}
-
-// parseFlags parses the given args into a config.
-// Extracted from main() for testability.
-func parseFlags(args []string) config {
-	fs := flag.NewFlagSet("golb", flag.ContinueOnError)
-	var backendList string
-	var cfg config
-
-	fs.StringVar(&backendList, "backends", "", "Comma-separated backend URLs")
-	fs.IntVar(&cfg.port, "port", 3030, "Port to listen on")
-	fs.StringVar(&cfg.healthPath, "health-path", "/health", "Health check path")
-	fs.DurationVar(&cfg.healthInterval, "health-interval", 10*time.Second, "Health check interval")
-	fs.DurationVar(&cfg.healthTimeout, "health-timeout", 2*time.Second, "Health check timeout")
-
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
-	}
-
-	if backendList != "" {
-		for _, b := range strings.Split(backendList, ",") {
-			if b = strings.TrimSpace(b); b != "" {
-				cfg.backends = append(cfg.backends, b)
+// extractConfigFlag pulls --config / -config (both --config=path and --config path forms)
+// out of args before passing the remainder to flag.FlagSet.  This is necessary because
+// flag.FlagSet would consume --config itself and leave no way for callers to know the path.
+// extractConfigFlag pulls --config / -config (both --config=path and --config path forms)
+// out of args before passing the remainder to flag.FlagSet.  This is necessary because
+// flag.FlagSet would consume --config itself and leave no way for callers to know the path.
+// Returns an error when --config is given without a value or with an empty value.
+func extractConfigFlag(args []string) (path string, rest []string, err error) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--config" || a == "-config" {
+			if i+1 >= len(args) {
+				err = fmt.Errorf("flag %s requires an argument", a)
+				return
 			}
+			path = args[i+1]
+			rest = append(append(rest, args[:i]...), args[i+2:]...)
+			return
+		}
+		if after, ok := strings.CutPrefix(a, "--config="); ok {
+			if after == "" {
+				err = fmt.Errorf("flag --config= requires a non-empty path")
+				return
+			}
+			path = after
+			rest = append(append(rest, args[:i]...), args[i+1:]...)
+			return
+		}
+		if after, ok := strings.CutPrefix(a, "-config="); ok {
+			if after == "" {
+				err = fmt.Errorf("flag -config= requires a non-empty path")
+				return
+			}
+			path = after
+			rest = append(append(rest, args[:i]...), args[i+1:]...)
+			return
 		}
 	}
-	return cfg
+	return "", args, nil
 }
 
 func main() {
-	cfg := parseFlags(os.Args[1:])
+	// Extract --config / -config (both --config=path and --config path forms).
+	cfgPath, args, err := extractConfigFlag(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config error:", err)
+		os.Exit(1)
+	}
+
+	cfg, err := config.Load(cfgPath, args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config error:", err)
+		os.Exit(1)
+	}
+
 	logger.Init()
 
-	if len(cfg.backends) == 0 {
-		slog.Error("no backends provided — use --backends=http://host:port,...")
+	if len(cfg.Pool.Backends) == 0 {
+		slog.Error("no backends configured — use --backends or a config file")
+		os.Exit(1)
+	}
+
+	a, err := algo.New(cfg.Pool.Algorithm)
+	if err != nil {
+		slog.Error("invalid algorithm", "error", err)
 		os.Exit(1)
 	}
 
 	p := &pool.ServerPool{}
-	lb := proxy.New(p)
+	lb := proxy.New(p, a)
 
-	for _, rawURL := range cfg.backends {
-		u, err := url.Parse(rawURL)
+	for _, bc := range cfg.Pool.Backends {
+		u, err := url.Parse(bc.URL)
 		if err != nil {
-			slog.Error("invalid backend URL", "url", rawURL, "error", err)
+			slog.Error("invalid backend URL", "url", bc.URL, "error", err)
 			os.Exit(1)
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
-			slog.Error("backend URL must use http or https scheme", "url", rawURL)
+			slog.Error("backend URL must use http or https scheme", "url", bc.URL)
 			os.Exit(1)
 		}
 		if u.Host == "" {
-			slog.Error("backend URL must include a host", "url", rawURL)
+			slog.Error("backend URL must include a host", "url", bc.URL)
 			os.Exit(1)
 		}
-		b := &backend.Backend{URL: u}
+		b := &backend.Backend{URL: u, Weight: bc.Weight}
 		b.SetAlive(true)
 		lb.SetupProxy(b)
 		p.AddBackend(b)
-		slog.Info("registered backend", "url", u.String())
+		slog.Info("registered backend", "url", u.String(), "weight", bc.Weight)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	hc := health.NewHealthChecker(p, cfg.healthPath, cfg.healthInterval, cfg.healthTimeout)
+	hc := health.NewHealthChecker(p,
+		cfg.HealthCheck.Path,
+		cfg.HealthCheck.Interval,
+		cfg.HealthCheck.Timeout,
+		health.WithUnhealthyThreshold(cfg.HealthCheck.UnhealthyThreshold),
+		health.WithHealthyThreshold(cfg.HealthCheck.HealthyThreshold),
+	)
 	go hc.Start(ctx)
 
-	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.port),
+	mainSrv := &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler: lb,
+	}
+
+	var adminSrv *http.Server
+	if cfg.Admin.Port != 0 {
+		adminSrv = admin.New(p, lb).Start(fmt.Sprintf(":%d", cfg.Admin.Port))
+		go func() {
+			slog.Info("admin server started", "port", cfg.Admin.Port)
+			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("admin server error", "error", err)
+			}
+		}()
 	}
 
 	quit := make(chan os.Signal, 1)
@@ -108,13 +150,22 @@ func main() {
 		cancel()
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer shutCancel()
-		if err := srv.Shutdown(shutCtx); err != nil {
+		if adminSrv != nil {
+			if err := adminSrv.Shutdown(shutCtx); err != nil {
+				slog.Error("admin shutdown error", "error", err)
+			}
+		}
+		if err := mainSrv.Shutdown(shutCtx); err != nil {
 			slog.Error("shutdown error", "error", err)
 		}
 	}()
 
-	slog.Info("golb started", "port", cfg.port, "backends", len(p.Backends()))
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	slog.Info("golb started",
+		"port", cfg.Server.Port,
+		"algorithm", cfg.Pool.Algorithm,
+		"backends", len(p.Backends()),
+	)
+	if err := mainSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}

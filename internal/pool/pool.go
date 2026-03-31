@@ -2,60 +2,57 @@ package pool
 
 import (
 	"net/url"
-	"sync/atomic"
+	"sync"
 
 	"github.com/VijayGohel/go-lb/internal/backend"
 )
 
-// ServerPool holds registered backends and the round-robin counter.
+// ServerPool holds registered backends, protected by an RWMutex.
 type ServerPool struct {
+	mu       sync.RWMutex
 	backends []*backend.Backend
-	current  uint64
 }
 
 // AddBackend registers a backend with the pool.
+// If a backend with the same URL is already registered it is a no-op.
 func (s *ServerPool) AddBackend(b *backend.Backend) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.backends {
+		if existing.URL.String() == b.URL.String() {
+			return
+		}
+	}
 	s.backends = append(s.backends, b)
 }
 
-// Backends returns a copy of all registered backends. Used by HealthChecker to iterate.
+// Backends returns a snapshot copy of all registered backends.
 // Callers must not modify the returned slice.
 func (s *ServerPool) Backends() []*backend.Backend {
-	return append([]*backend.Backend(nil), s.backends...)
+	s.mu.RLock()
+	cp := append([]*backend.Backend(nil), s.backends...)
+	s.mu.RUnlock()
+	return cp
 }
 
-// NextIndex atomically increments and wraps the counter.
-// Returns -1 if the pool is empty.
-func (s *ServerPool) NextIndex() int {
-	n := len(s.backends)
-	if n == 0 {
-		return -1
-	}
-	return int(atomic.AddUint64(&s.current, uint64(1)) % uint64(n))
-}
-
-// GetNextPeer returns the next alive backend using round-robin, skipping dead ones.
-// Returns nil if no backends are alive or the pool is empty.
-func (s *ServerPool) GetNextPeer() *backend.Backend {
-	if len(s.backends) == 0 {
-		return nil
-	}
-	next := s.NextIndex()
-	l := len(s.backends) + next
-	for i := next; i < l; i++ {
-		idx := i % len(s.backends)
-		if s.backends[idx].IsAlive() {
-			if i != next {
-				atomic.StoreUint64(&s.current, uint64(idx))
-			}
-			return s.backends[idx]
+// Remove removes the backend with the given raw URL string.
+// Returns true if found and removed, false otherwise.
+func (s *ServerPool) Remove(rawURL string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, b := range s.backends {
+		if b.URL.String() == rawURL {
+			s.backends = append(s.backends[:i], s.backends[i+1:]...)
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 // MarkBackendStatus finds a backend by URL and updates its alive state.
 func (s *ServerPool) MarkBackendStatus(backendURL *url.URL, alive bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, b := range s.backends {
 		if b.URL.String() == backendURL.String() {
 			b.SetAlive(alive)

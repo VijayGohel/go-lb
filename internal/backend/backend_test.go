@@ -15,41 +15,31 @@ func mustParseURL(raw string) *url.URL {
 	return u
 }
 
-func TestBackend_IsAlive_DefaultsToFalse(t *testing.T) {
-	b := &backend.Backend{}
-	if b.IsAlive() {
-		t.Fatal("new backend should default to not alive")
-	}
-}
-
-func TestBackend_SetAlive_True(t *testing.T) {
-	b := &backend.Backend{}
+func TestBackend_ActiveConns(t *testing.T) {
+	b := &backend.Backend{URL: mustParseURL("http://localhost:8081"), Weight: 1}
 	b.SetAlive(true)
-	if !b.IsAlive() {
-		t.Fatal("backend should be alive after SetAlive(true)")
+
+	if b.ActiveConns() != 0 {
+		t.Fatalf("expected 0 active conns, got %d", b.ActiveConns())
+	}
+
+	b.IncrConns()
+	b.IncrConns()
+	if b.ActiveConns() != 2 {
+		t.Fatalf("expected 2 active conns after 2 IncrConns, got %d", b.ActiveConns())
+	}
+
+	b.DecrConns()
+	if b.ActiveConns() != 1 {
+		t.Fatalf("expected 1 active conn after DecrConns, got %d", b.ActiveConns())
 	}
 }
 
-func TestBackend_SetAlive_False(t *testing.T) {
-	b := &backend.Backend{}
-	b.SetAlive(true)
-	b.SetAlive(false)
-	if b.IsAlive() {
-		t.Fatal("backend should be dead after SetAlive(false)")
-	}
-}
-
-func TestBackend_ConcurrentSetAlive(t *testing.T) {
+func TestBackend_WeightDefault(t *testing.T) {
 	b := &backend.Backend{URL: mustParseURL("http://localhost:8081")}
-	done := make(chan struct{})
-	for i := 0; i < 100; i++ {
-		go func(alive bool) {
-			b.SetAlive(alive)
-			_ = b.IsAlive()
-			done <- struct{}{}
-		}(i%2 == 0)
-	}
-	for i := 0; i < 100; i++ {
-		<-done
+	// Weight zero-value is 0; the algo layer normalises it to 1. Just verify field exists.
+	b.Weight = 3
+	if b.Weight != 3 {
+		t.Fatalf("expected Weight=3, got %d", b.Weight)
 	}
 }

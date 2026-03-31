@@ -1,0 +1,23 @@
+server:
+  port: 3030
+
+pool:
+  # algorithm: round_robin | least_connections | weighted_round_robin
+  algorithm: round_robin
+  backends:
+    - url: http://localhost:8081
+      weight: 1
+    - url: http://localhost:8082
+      weight: 1
+    - url: http://localhost:8083
+      weight: 1
+
+health_check:
+  path: /health   # must return 2xx; use / when testing with python3 -m http.server
+  interval: 10s
+  timeout: 2s
+  unhealthy_threshold: 3   # consecutive failures before marking dead
+  healthy_threshold: 2     # consecutive successes before marking alive
+
+admin:
+  port: 9090   # set to 0 to disable admin API

@@ -61,6 +61,8 @@ func Defaults() Config {
 }
 
 // fileConfig mirrors Config for YAML unmarshalling using string durations.
+// Admin.Port is a pointer so that an explicit 0 (disable admin) can be
+// distinguished from the field being absent (keep default).
 type fileConfig struct {
 	Server struct {
 		Port int `yaml:"port"`
@@ -80,7 +82,7 @@ type fileConfig struct {
 		HealthyThreshold   int    `yaml:"healthy_threshold"`
 	} `yaml:"health_check"`
 	Admin struct {
-		Port int `yaml:"port"`
+		Port *int `yaml:"port"`
 	} `yaml:"admin"`
 }
 
@@ -98,7 +100,9 @@ func Load(path string, args []string) (Config, error) {
 		if err := yaml.Unmarshal(data, &fc); err != nil {
 			return Config{}, fmt.Errorf("parsing config file: %w", err)
 		}
-		applyFileConfig(&cfg, &fc)
+		if err := applyFileConfig(&cfg, &fc); err != nil {
+			return Config{}, err
+		}
 	}
 
 	if err := applyCLI(&cfg, args); err != nil {
@@ -107,7 +111,7 @@ func Load(path string, args []string) (Config, error) {
 	return cfg, nil
 }
 
-func applyFileConfig(cfg *Config, fc *fileConfig) {
+func applyFileConfig(cfg *Config, fc *fileConfig) error {
 	if fc.Server.Port != 0 {
 		cfg.Server.Port = fc.Server.Port
 	}
@@ -128,14 +132,18 @@ func applyFileConfig(cfg *Config, fc *fileConfig) {
 		cfg.HealthCheck.Path = fc.HealthCheck.Path
 	}
 	if fc.HealthCheck.Interval != "" {
-		if d, err := time.ParseDuration(fc.HealthCheck.Interval); err == nil {
-			cfg.HealthCheck.Interval = d
+		d, err := time.ParseDuration(fc.HealthCheck.Interval)
+		if err != nil {
+			return fmt.Errorf("invalid health_check.interval %q: %w", fc.HealthCheck.Interval, err)
 		}
+		cfg.HealthCheck.Interval = d
 	}
 	if fc.HealthCheck.Timeout != "" {
-		if d, err := time.ParseDuration(fc.HealthCheck.Timeout); err == nil {
-			cfg.HealthCheck.Timeout = d
+		d, err := time.ParseDuration(fc.HealthCheck.Timeout)
+		if err != nil {
+			return fmt.Errorf("invalid health_check.timeout %q: %w", fc.HealthCheck.Timeout, err)
 		}
+		cfg.HealthCheck.Timeout = d
 	}
 	if fc.HealthCheck.UnhealthyThreshold != 0 {
 		cfg.HealthCheck.UnhealthyThreshold = fc.HealthCheck.UnhealthyThreshold
@@ -143,9 +151,10 @@ func applyFileConfig(cfg *Config, fc *fileConfig) {
 	if fc.HealthCheck.HealthyThreshold != 0 {
 		cfg.HealthCheck.HealthyThreshold = fc.HealthCheck.HealthyThreshold
 	}
-	if fc.Admin.Port != 0 {
-		cfg.Admin.Port = fc.Admin.Port
+	if fc.Admin.Port != nil {
+		cfg.Admin.Port = *fc.Admin.Port
 	}
+	return nil
 }
 
 func applyCLI(cfg *Config, args []string) error {

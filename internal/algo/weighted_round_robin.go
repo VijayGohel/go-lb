@@ -22,6 +22,17 @@ func (w *WeightedRoundRobin) Next(backends []*backend.Backend) *backend.Backend 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Prune keys for backends no longer in the pool.
+	active := make(map[string]struct{}, len(backends))
+	for _, b := range backends {
+		active[b.URL.String()] = struct{}{}
+	}
+	for key := range w.currentWeights {
+		if _, ok := active[key]; !ok {
+			delete(w.currentWeights, key)
+		}
+	}
+
 	totalWeight := 0
 	for _, b := range backends {
 		if !b.IsAlive() {

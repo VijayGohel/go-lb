@@ -60,6 +60,12 @@ func NewHealthChecker(p *pool.ServerPool, path string, interval, timeout time.Du
 	for _, o := range opts {
 		o(hc)
 	}
+	if hc.unhealthyThreshold < 1 {
+		hc.unhealthyThreshold = 1
+	}
+	if hc.healthyThreshold < 1 {
+		hc.healthyThreshold = 1
+	}
 	return hc
 }
 
@@ -93,10 +99,12 @@ func (hc *HealthChecker) recordSuccess(b *backend.Backend) {
 		hc.consecutive[key] = 0 // direction changed
 	}
 	hc.consecutive[key]++
-	if hc.consecutive[key] >= hc.healthyThreshold && !b.IsAlive() {
-		b.SetAlive(true)
-		hc.consecutive[key] = 0
-		slog.Info("backend_up", "backend", key)
+	if hc.consecutive[key] >= hc.healthyThreshold {
+		if !b.IsAlive() {
+			b.SetAlive(true)
+			slog.Info("backend_up", "backend", key)
+		}
+		hc.consecutive[key] = 0 // reset after threshold; also caps growth for always-healthy backends
 	}
 }
 
@@ -108,10 +116,12 @@ func (hc *HealthChecker) recordFailure(b *backend.Backend) {
 		hc.consecutive[key] = 0 // direction changed
 	}
 	hc.consecutive[key]--
-	if -hc.consecutive[key] >= hc.unhealthyThreshold && b.IsAlive() {
-		b.SetAlive(false)
-		hc.consecutive[key] = 0
-		slog.Warn("backend_down", "backend", key, "error", "unhealthy threshold reached")
+	if -hc.consecutive[key] >= hc.unhealthyThreshold {
+		if b.IsAlive() {
+			b.SetAlive(false)
+			slog.Warn("backend_down", "backend", key, "error", "unhealthy threshold reached")
+		}
+		hc.consecutive[key] = 0 // reset after threshold; also caps growth for always-failing backends
 	}
 }
 

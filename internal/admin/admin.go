@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/VijayGohel/go-lb/internal/backend"
 	"github.com/VijayGohel/go-lb/internal/pool"
@@ -35,10 +36,14 @@ func (s *Server) Handler() http.Handler {
 }
 
 // Start binds the admin server to addr and serves until ctx is cancelled.
+// When ctx is cancelled, it shuts down the server with a 5-second drain timeout.
 func (s *Server) Start(ctx context.Context, addr string) *http.Server {
 	srv := &http.Server{Addr: addr, Handler: s.Handler()}
 	go func() {
 		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx)
 	}()
 	return srv
 }
@@ -94,11 +99,15 @@ func (s *Server) addBackend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid url: "+err.Error())
 		return
 	}
-	w8 := req.Weight
-	if w8 <= 0 {
-		w8 = 1
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		writeError(w, http.StatusBadRequest, "url must use http or https scheme with a non-empty host")
+		return
 	}
-	b := &backend.Backend{URL: u, Weight: w8}
+	weight := req.Weight
+	if weight <= 0 {
+		weight = 1
+	}
+	b := &backend.Backend{URL: u, Weight: weight}
 	b.SetAlive(true)
 	s.lb.SetupProxy(b)
 	s.pool.AddBackend(b)

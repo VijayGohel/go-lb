@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,19 +22,46 @@ import (
 	"github.com/VijayGohel/go-lb/internal/proxy"
 )
 
-func main() {
-	// Determine config file path from first arg if it looks like a --config= flag.
-	cfgPath := ""
-	args := os.Args[1:]
-	for i, a := range args {
-		if len(a) > 9 && a[:9] == "--config=" {
-			cfgPath = a[9:]
-			args = append(args[:i], args[i+1:]...)
-			break
+// extractConfigFlag pulls --config / -config (both --config=path and --config path forms)
+// out of args before passing the remainder to flag.FlagSet.  This is necessary because
+// flag.FlagSet would consume --config itself and leave no way for callers to know the path.
+func extractConfigFlag(args []string) (path string, rest []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--config" || a == "-config" {
+			if i+1 < len(args) {
+				path = args[i+1]
+				rest = append(rest, args[:i]...)
+				rest = append(rest, args[i+2:]...)
+				return
+			}
+			// --config with no value: skip, let flag.FlagSet report the error
+			rest = append(rest, args[:i]...)
+			rest = append(rest, args[i+1:]...)
+			return
+		}
+		if after, ok := strings.CutPrefix(a, "--config="); ok {
+			path = after
+			rest = append(rest, args[:i]...)
+			rest = append(rest, args[i+1:]...)
+			return
+		}
+		if after, ok := strings.CutPrefix(a, "-config="); ok {
+			path = after
+			rest = append(rest, args[:i]...)
+			rest = append(rest, args[i+1:]...)
+			return
 		}
 	}
+	return "", args
+}
+
+func main() {
+	// Extract --config / -config (both --config=path and --config path forms).
+	cfgPath, args := extractConfigFlag(os.Args[1:])
 
 	cfg, err := config.Load(cfgPath, args)
+
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config error:", err)
 		os.Exit(1)

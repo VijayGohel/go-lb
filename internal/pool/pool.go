@@ -14,10 +14,16 @@ type ServerPool struct {
 }
 
 // AddBackend registers a backend with the pool.
+// If a backend with the same URL is already registered it is a no-op.
 func (s *ServerPool) AddBackend(b *backend.Backend) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.backends {
+		if existing.URL.String() == b.URL.String() {
+			return
+		}
+	}
 	s.backends = append(s.backends, b)
-	s.mu.Unlock()
 }
 
 // Backends returns a snapshot copy of all registered backends.

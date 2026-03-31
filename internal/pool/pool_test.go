@@ -78,3 +78,13 @@ func TestServerPool_Remove_MissingBackend(t *testing.T) {
 		t.Fatal("pool length changed after removing non-existent backend")
 	}
 }
+
+func TestServerPool_AddBackend_NoDuplicates(t *testing.T) {
+	p := &pool.ServerPool{}
+	p.AddBackend(makeBackend("http://localhost:8081", true))
+	p.AddBackend(makeBackend("http://localhost:8081", true)) // duplicate
+
+	if len(p.Backends()) != 1 {
+		t.Fatalf("expected 1 backend after duplicate add, got %d", len(p.Backends()))
+	}
+}

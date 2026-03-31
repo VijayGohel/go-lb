@@ -121,6 +121,26 @@ func TestAdmin_AddBackend_InvalidJSON_Returns400(t *testing.T) {
 	}
 }
 
+func TestAdmin_AddBackend_Duplicate_Returns409(t *testing.T) {
+	_, _, h := setup()
+
+	body := `{"url":"http://localhost:8082","weight":1}`
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/admin/backends", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, req)
+		return rw
+	}
+
+	if rw := post(); rw.Code != http.StatusCreated {
+		t.Fatalf("first add: expected 201, got %d: %s", rw.Code, rw.Body.String())
+	}
+	if rw := post(); rw.Code != http.StatusConflict {
+		t.Fatalf("duplicate add: expected 409, got %d: %s", rw.Code, rw.Body.String())
+	}
+}
+
 func TestAdmin_RemoveBackend(t *testing.T) {
 	p, _, h := setup()
 	p.AddBackend(makeBackend("http://localhost:8081", true))

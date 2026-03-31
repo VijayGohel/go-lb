@@ -25,43 +25,53 @@ import (
 // extractConfigFlag pulls --config / -config (both --config=path and --config path forms)
 // out of args before passing the remainder to flag.FlagSet.  This is necessary because
 // flag.FlagSet would consume --config itself and leave no way for callers to know the path.
-func extractConfigFlag(args []string) (path string, rest []string) {
+// extractConfigFlag pulls --config / -config (both --config=path and --config path forms)
+// out of args before passing the remainder to flag.FlagSet.  This is necessary because
+// flag.FlagSet would consume --config itself and leave no way for callers to know the path.
+// Returns an error when --config is given without a value or with an empty value.
+func extractConfigFlag(args []string) (path string, rest []string, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--config" || a == "-config" {
-			if i+1 < len(args) {
-				path = args[i+1]
-				rest = append(rest, args[:i]...)
-				rest = append(rest, args[i+2:]...)
+			if i+1 >= len(args) {
+				err = fmt.Errorf("flag %s requires an argument", a)
 				return
 			}
-			// --config with no value: skip, let flag.FlagSet report the error
-			rest = append(rest, args[:i]...)
-			rest = append(rest, args[i+1:]...)
+			path = args[i+1]
+			rest = append(append(rest, args[:i]...), args[i+2:]...)
 			return
 		}
 		if after, ok := strings.CutPrefix(a, "--config="); ok {
+			if after == "" {
+				err = fmt.Errorf("flag --config= requires a non-empty path")
+				return
+			}
 			path = after
-			rest = append(rest, args[:i]...)
-			rest = append(rest, args[i+1:]...)
+			rest = append(append(rest, args[:i]...), args[i+1:]...)
 			return
 		}
 		if after, ok := strings.CutPrefix(a, "-config="); ok {
+			if after == "" {
+				err = fmt.Errorf("flag -config= requires a non-empty path")
+				return
+			}
 			path = after
-			rest = append(rest, args[:i]...)
-			rest = append(rest, args[i+1:]...)
+			rest = append(append(rest, args[:i]...), args[i+1:]...)
 			return
 		}
 	}
-	return "", args
+	return "", args, nil
 }
 
 func main() {
 	// Extract --config / -config (both --config=path and --config path forms).
-	cfgPath, args := extractConfigFlag(os.Args[1:])
+	cfgPath, args, err := extractConfigFlag(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config error:", err)
+		os.Exit(1)
+	}
 
 	cfg, err := config.Load(cfgPath, args)
-
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config error:", err)
 		os.Exit(1)
@@ -123,7 +133,7 @@ func main() {
 
 	var adminSrv *http.Server
 	if cfg.Admin.Port != 0 {
-		adminSrv = admin.New(p, lb).Start(ctx, fmt.Sprintf(":%d", cfg.Admin.Port))
+		adminSrv = admin.New(p, lb).Start(fmt.Sprintf(":%d", cfg.Admin.Port))
 		go func() {
 			slog.Info("admin server started", "port", cfg.Admin.Port)
 			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

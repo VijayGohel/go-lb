@@ -1,11 +1,9 @@
 package admin
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"time"
 
 	"github.com/VijayGohel/go-lb/internal/backend"
 	"github.com/VijayGohel/go-lb/internal/pool"
@@ -35,17 +33,10 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// Start binds the admin server to addr and serves until ctx is cancelled.
-// When ctx is cancelled, it shuts down the server with a 5-second drain timeout.
-func (s *Server) Start(ctx context.Context, addr string) *http.Server {
-	srv := &http.Server{Addr: addr, Handler: s.Handler()}
-	go func() {
-		<-ctx.Done()
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutCtx)
-	}()
-	return srv
+// Start creates an *http.Server bound to addr.
+// The caller is responsible for calling ListenAndServe and for shutting it down.
+func (s *Server) Start(addr string) *http.Server {
+	return &http.Server{Addr: addr, Handler: s.Handler()}
 }
 
 type backendStatus struct {
@@ -102,6 +93,12 @@ func (s *Server) addBackend(w http.ResponseWriter, r *http.Request) {
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		writeError(w, http.StatusBadRequest, "url must use http or https scheme with a non-empty host")
 		return
+	}
+	for _, existing := range s.pool.Backends() {
+		if existing.URL.String() == u.String() {
+			writeError(w, http.StatusConflict, "backend already exists")
+			return
+		}
 	}
 	weight := req.Weight
 	if weight <= 0 {

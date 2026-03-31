@@ -1,4 +1,4 @@
-BINARY   := golb
+BINARY   := bin/golb
 CMD_PATH := ./cmd/golb
 
 .PHONY: build test vet fmt lint clean install-lint

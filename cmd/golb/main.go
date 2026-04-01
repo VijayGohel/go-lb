@@ -18,8 +18,10 @@ import (
 	"github.com/VijayGohel/go-lb/internal/config"
 	"github.com/VijayGohel/go-lb/internal/health"
 	"github.com/VijayGohel/go-lb/internal/logger"
+	"github.com/VijayGohel/go-lb/internal/middleware"
 	"github.com/VijayGohel/go-lb/internal/pool"
 	"github.com/VijayGohel/go-lb/internal/proxy"
+	"github.com/VijayGohel/go-lb/internal/ratelimit"
 )
 
 // extractConfigFlag pulls --config / -config (both --config=path and --config path forms)
@@ -126,9 +128,21 @@ func main() {
 	)
 	go hc.Start(ctx)
 
+	var handler http.Handler = lb
+	if cfg.RateLimit.Enabled {
+		rl := ratelimit.New(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst, cfg.RateLimit.PerIP)
+		defer rl.Stop()
+		handler = middleware.Chain(handler, rl.Middleware())
+		slog.Info("rate limiter enabled",
+			"rps", cfg.RateLimit.RequestsPerSecond,
+			"burst", cfg.RateLimit.Burst,
+			"per_ip", cfg.RateLimit.PerIP,
+		)
+	}
+
 	mainSrv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler: lb,
+		Handler: handler,
 	}
 
 	var adminSrv *http.Server

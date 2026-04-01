@@ -21,3 +21,9 @@ health_check:
 
 admin:
   port: 9090   # set to 0 to disable admin API
+
+rate_limit:
+  enabled: false               # enable token bucket rate limiting
+  requests_per_second: 1000    # token refill rate
+  burst: 200                   # max burst size
+  per_ip: true                 # per-IP (true) or global (false)

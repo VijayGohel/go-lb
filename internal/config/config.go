@@ -16,6 +16,7 @@ type Config struct {
 	Pool        PoolConfig
 	HealthCheck HealthCheckConfig
 	Admin       AdminConfig
+	RateLimit   RateLimitConfig
 }
 
 type ServerConfig struct {
@@ -44,6 +45,13 @@ type AdminConfig struct {
 	Port int
 }
 
+type RateLimitConfig struct {
+	Enabled           bool    `yaml:"enabled"`             // default false
+	RequestsPerSecond float64 `yaml:"requests_per_second"` // default 1000
+	Burst             int     `yaml:"burst"`               // default 200
+	PerIP             bool    `yaml:"per_ip"`              // default true
+}
+
 // Defaults returns a Config pre-filled with production defaults.
 func Defaults() Config {
 	return Config{
@@ -57,6 +65,12 @@ func Defaults() Config {
 			HealthyThreshold:   2,
 		},
 		Admin: AdminConfig{Port: 9090},
+		RateLimit: RateLimitConfig{
+			Enabled:           false,
+			RequestsPerSecond: 1000,
+			Burst:             200,
+			PerIP:             true,
+		},
 	}
 }
 
@@ -84,6 +98,12 @@ type fileConfig struct {
 	Admin struct {
 		Port *int `yaml:"port"`
 	} `yaml:"admin"`
+	RateLimit struct {
+		Enabled           *bool    `yaml:"enabled"`
+		RequestsPerSecond *float64 `yaml:"requests_per_second"`
+		Burst             *int     `yaml:"burst"`
+		PerIP             *bool    `yaml:"per_ip"`
+	} `yaml:"rate_limit"`
 }
 
 // Load reads the YAML file at path (if non-empty), then applies CLI overrides.
@@ -154,6 +174,18 @@ func applyFileConfig(cfg *Config, fc *fileConfig) error {
 	if fc.Admin.Port != nil {
 		cfg.Admin.Port = *fc.Admin.Port
 	}
+	if fc.RateLimit.Enabled != nil {
+		cfg.RateLimit.Enabled = *fc.RateLimit.Enabled
+	}
+	if fc.RateLimit.RequestsPerSecond != nil {
+		cfg.RateLimit.RequestsPerSecond = *fc.RateLimit.RequestsPerSecond
+	}
+	if fc.RateLimit.Burst != nil {
+		cfg.RateLimit.Burst = *fc.RateLimit.Burst
+	}
+	if fc.RateLimit.PerIP != nil {
+		cfg.RateLimit.PerIP = *fc.RateLimit.PerIP
+	}
 	return nil
 }
 
@@ -168,6 +200,10 @@ func applyCLI(cfg *Config, args []string) error {
 		healthInterval time.Duration
 		healthTimeout  time.Duration
 		adminPort      int
+		rlEnabled      bool
+		rlRPS          float64
+		rlBurst        int
+		rlPerIP        bool
 	)
 
 	fs.IntVar(&port, "port", 0, "Port to listen on")
@@ -177,6 +213,10 @@ func applyCLI(cfg *Config, args []string) error {
 	fs.DurationVar(&healthInterval, "health-interval", 0, "Health check interval")
 	fs.DurationVar(&healthTimeout, "health-timeout", 0, "Health check timeout")
 	fs.IntVar(&adminPort, "admin-port", 0, "Admin server port (0=disabled)")
+	fs.BoolVar(&rlEnabled, "rl-enabled", false, "Enable rate limiting")
+	fs.Float64Var(&rlRPS, "rl-rps", 0, "Rate limit: requests per second")
+	fs.IntVar(&rlBurst, "rl-burst", 0, "Rate limit: burst size")
+	fs.BoolVar(&rlPerIP, "rl-per-ip", false, "Rate limit: per-IP mode")
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parsing CLI flags: %w", err)
@@ -204,6 +244,14 @@ func applyCLI(cfg *Config, args []string) error {
 			cfg.HealthCheck.Timeout = healthTimeout
 		case "admin-port":
 			cfg.Admin.Port = adminPort
+		case "rl-enabled":
+			cfg.RateLimit.Enabled = rlEnabled
+		case "rl-rps":
+			cfg.RateLimit.RequestsPerSecond = rlRPS
+		case "rl-burst":
+			cfg.RateLimit.Burst = rlBurst
+		case "rl-per-ip":
+			cfg.RateLimit.PerIP = rlPerIP
 		}
 	})
 	return nil

@@ -56,12 +56,13 @@ type entry struct {
 
 // Limiter provides token bucket rate limiting in global or per-IP mode.
 type Limiter struct {
-	global  *bucket  // used when perIPOn=false
-	perIP   sync.Map // string -> *entry; used when perIPOn=true
-	rate    float64
-	burst   int
-	perIPOn bool
-	done    chan struct{}
+	global   *bucket  // used when perIPOn=false
+	perIP    sync.Map // string -> *entry; used when perIPOn=true
+	rate     float64
+	burst    int
+	perIPOn  bool
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 // New creates a Limiter. When perIP is true, each unique IP gets its own
@@ -118,14 +119,9 @@ func (l *Limiter) Middleware() middleware.Middleware {
 	}
 }
 
-// Stop halts the background cleanup goroutine.
+// Stop halts the background cleanup goroutine. Safe to call multiple times.
 func (l *Limiter) Stop() {
-	select {
-	case <-l.done:
-		// already closed
-	default:
-		close(l.done)
-	}
+	l.stopOnce.Do(func() { close(l.done) })
 }
 
 // cleanup runs every 60 seconds and evicts per-IP entries not seen

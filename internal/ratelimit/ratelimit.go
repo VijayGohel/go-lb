@@ -1,8 +1,11 @@
 package ratelimit
 
 import (
+	"fmt"
+	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,6 +51,22 @@ func (b *bucket) allow() bool {
 	return false
 }
 
+// retryAfterSeconds returns the estimated seconds until a token is available.
+func (b *bucket) retryAfterSeconds() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.rate <= 0 {
+		return 1
+	}
+	deficit := 1.0 - b.tokens
+	if deficit <= 0 {
+		return 1
+	}
+	secs := deficit / b.rate
+	return int(math.Ceil(secs))
+}
+
 // entry holds a per-IP bucket and a last-seen timestamp for cleanup.
 type entry struct {
 	bucket   *bucket
@@ -67,7 +86,14 @@ type Limiter struct {
 
 // New creates a Limiter. When perIP is true, each unique IP gets its own
 // token bucket; otherwise a single global bucket is shared.
-func New(rps float64, burst int, perIP bool) *Limiter {
+// It returns an error if rps <= 0 or burst < 1.
+func New(rps float64, burst int, perIP bool) (*Limiter, error) {
+	if rps <= 0 {
+		return nil, fmt.Errorf("ratelimit: requests_per_second must be > 0, got %g", rps)
+	}
+	if burst < 1 {
+		return nil, fmt.Errorf("ratelimit: burst must be >= 1, got %d", burst)
+	}
 	l := &Limiter{
 		rate:    rps,
 		burst:   burst,
@@ -79,7 +105,7 @@ func New(rps float64, burst int, perIP bool) *Limiter {
 	} else {
 		go l.cleanup()
 	}
-	return l
+	return l, nil
 }
 
 // Allow checks whether a request from ip is permitted.
@@ -104,19 +130,33 @@ func (l *Limiter) Allow(ip string) bool {
 }
 
 // Middleware returns a middleware.Middleware that enforces the rate limit.
-// Rejected requests receive 429 Too Many Requests with a Retry-After header.
+// Rejected requests receive 429 Too Many Requests with a dynamic Retry-After header
+// based on the token bucket's estimated refill time.
 func (l *Limiter) Middleware() middleware.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := clientIP(r)
 			if !l.Allow(ip) {
-				w.Header().Set("Retry-After", "1")
+				retryAfter := l.retryAfter(ip)
+				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 				http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// retryAfter returns the estimated seconds until a token is available for ip.
+func (l *Limiter) retryAfter(ip string) int {
+	if !l.perIPOn {
+		return l.global.retryAfterSeconds()
+	}
+	val, ok := l.perIP.Load(ip)
+	if !ok {
+		return 1
+	}
+	return val.(*entry).bucket.retryAfterSeconds()
 }
 
 // Stop halts the background cleanup goroutine. Safe to call multiple times.

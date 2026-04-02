@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -49,7 +50,10 @@ func TestBucket_RefillOverTime(t *testing.T) {
 // --- global limiter tests ---
 
 func TestGlobalLimiter_BurstExhaustion_Returns429(t *testing.T) {
-	lim := New(10, 3, false) // global mode, burst 3
+	lim, err := New(10, 3, false) // global mode, burst 3
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer lim.Stop()
 
 	mw := lim.Middleware()
@@ -82,7 +86,10 @@ func TestGlobalLimiter_BurstExhaustion_Returns429(t *testing.T) {
 // --- per-IP limiter tests ---
 
 func TestPerIPLimiter_IndependentLimits(t *testing.T) {
-	lim := New(10, 2, true) // per-IP mode, burst 2
+	lim, err := New(10, 2, true) // per-IP mode, burst 2
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer lim.Stop()
 
 	// IP-A: exhaust its 2 tokens.
@@ -111,7 +118,10 @@ func TestPerIPLimiter_IndependentLimits(t *testing.T) {
 // --- middleware tests ---
 
 func TestMiddleware_429_RetryAfterHeader(t *testing.T) {
-	lim := New(1, 1, false) // 1 rps, burst 1 (global)
+	lim, err := New(1, 1, false) // 1 rps, burst 1 (global)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer lim.Stop()
 
 	mw := lim.Middleware()
@@ -137,13 +147,20 @@ func TestMiddleware_429_RetryAfterHeader(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests {
 		t.Errorf("want 429, got %d", rec.Code)
 	}
-	if ra := rec.Header().Get("Retry-After"); ra != "1" {
-		t.Errorf("Retry-After: want %q, got %q", "1", ra)
+	ra := rec.Header().Get("Retry-After")
+	if ra == "" {
+		t.Error("expected Retry-After header")
+	}
+	if raVal, err := strconv.Atoi(ra); err != nil || raVal < 1 {
+		t.Errorf("Retry-After: want positive integer, got %q", ra)
 	}
 }
 
 func TestMiddleware_ExtractsIPFromRemoteAddr(t *testing.T) {
-	lim := New(10, 1, true) // per-IP, burst 1
+	lim, err := New(10, 1, true) // per-IP, burst 1
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer lim.Stop()
 
 	mw := lim.Middleware()
@@ -183,7 +200,10 @@ func TestMiddleware_ExtractsIPFromRemoteAddr(t *testing.T) {
 // --- cleanup tests ---
 
 func TestCleanup_EvictsOldEntries(t *testing.T) {
-	lim := New(100, 10, true)
+	lim, err := New(100, 10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer lim.Stop()
 
 	// Seed two IPs.
@@ -220,7 +240,10 @@ func TestCleanup_EvictsOldEntries(t *testing.T) {
 // --- concurrency test ---
 
 func TestLimiter_ConcurrentAccess(t *testing.T) {
-	lim := New(1000, 100, true)
+	lim, err := New(1000, 100, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer lim.Stop()
 
 	var wg sync.WaitGroup
@@ -234,5 +257,21 @@ func TestLimiter_ConcurrentAccess(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	// If we get here without a race-detector panic, concurrency is safe.
+	// This verifies that concurrent calls to Allow do not deadlock or crash.
+	// To detect data races, run the test suite with: go test -race ./...
+}
+
+func TestNew_InvalidParams_ReturnsError(t *testing.T) {
+	if _, err := New(0, 10, false); err == nil {
+		t.Error("expected error for rps=0")
+	}
+	if _, err := New(-1, 10, false); err == nil {
+		t.Error("expected error for negative rps")
+	}
+	if _, err := New(10, 0, false); err == nil {
+		t.Error("expected error for burst=0")
+	}
+	if _, err := New(10, -5, false); err == nil {
+		t.Error("expected error for negative burst")
+	}
 }

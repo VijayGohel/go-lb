@@ -130,7 +130,11 @@ func main() {
 
 	var handler http.Handler = lb
 	if cfg.RateLimit.Enabled {
-		rl := ratelimit.New(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst, cfg.RateLimit.PerIP)
+		rl, err := ratelimit.New(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst, cfg.RateLimit.PerIP)
+		if err != nil {
+			slog.Error("invalid rate limit config", "error", err)
+			os.Exit(1)
+		}
 		defer rl.Stop()
 		handler = middleware.Chain(handler, rl.Middleware())
 		slog.Info("rate limiter enabled",

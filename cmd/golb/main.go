@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"github.com/VijayGohel/go-lb/internal/pool"
 	"github.com/VijayGohel/go-lb/internal/proxy"
 	"github.com/VijayGohel/go-lb/internal/ratelimit"
+	"github.com/VijayGohel/go-lb/internal/sticky"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -68,6 +70,21 @@ func extractConfigFlag(args []string) (path string, rest []string, err error) {
 	return "", args, nil
 }
 
+// parseTLSVersion maps a human-readable TLS version string to the crypto/tls constant.
+// Trims whitespace, accepts "1.2" and "1.3". Warns and falls back to TLS 1.2 on unknown input.
+func parseTLSVersion(s string) uint16 {
+	s = strings.TrimSpace(s)
+	switch s {
+	case "1.3":
+		return tls.VersionTLS13
+	case "1.2", "":
+		return tls.VersionTLS12
+	default:
+		slog.Warn("unsupported TLS min_version; falling back to TLS 1.2", "value", s)
+		return tls.VersionTLS12
+	}
+}
+
 func main() {
 	// Extract --config / -config (both --config=path and --config path forms).
 	cfgPath, args, err := extractConfigFlag(os.Args[1:])
@@ -87,6 +104,34 @@ func main() {
 	if len(cfg.Pool.Backends) == 0 {
 		slog.Error("no backends configured — use --backends or a config file")
 		os.Exit(1)
+	}
+
+	// Validate TLS cert/key paths early, before starting any services.
+	if cfg.TLS.Enabled {
+		if cfg.TLS.CertFile == "" || cfg.TLS.KeyFile == "" {
+			slog.Error("TLS enabled but cert or key path is empty")
+			os.Exit(1)
+		}
+		if _, err := os.Stat(cfg.TLS.CertFile); err != nil {
+			slog.Error("TLS cert file not accessible", "path", cfg.TLS.CertFile, "error", err)
+			os.Exit(1)
+		}
+		if _, err := os.Stat(cfg.TLS.KeyFile); err != nil {
+			slog.Error("TLS key file not accessible", "path", cfg.TLS.KeyFile, "error", err)
+			os.Exit(1)
+		}
+	}
+
+	// Validate sticky session config.
+	if cfg.StickySession.Enabled {
+		if strings.TrimSpace(cfg.StickySession.CookieName) == "" {
+			slog.Error("sticky sessions enabled but cookie_name is empty")
+			os.Exit(1)
+		}
+		if cfg.StickySession.TTL <= 0 {
+			slog.Error("sticky sessions enabled but TTL must be > 0", "ttl", cfg.StickySession.TTL)
+			os.Exit(1)
+		}
 	}
 
 	a, err := algo.New(cfg.Pool.Algorithm)
@@ -109,6 +154,18 @@ func main() {
 			"failure_threshold", cfg.CircuitBreaker.FailureThreshold,
 			"success_threshold", cfg.CircuitBreaker.SuccessThreshold,
 			"timeout", cfg.CircuitBreaker.Timeout,
+		)
+	}
+	if cfg.StickySession.Enabled {
+		sa := sticky.New(
+			cfg.StickySession.CookieName,
+			cfg.StickySession.TTL,
+			sticky.WithSecure(cfg.TLS.Enabled),
+		)
+		proxyOpts = append(proxyOpts, proxy.WithStickySession(sa))
+		slog.Info("sticky sessions enabled",
+			"cookie", cfg.StickySession.CookieName,
+			"ttl", cfg.StickySession.TTL,
 		)
 	}
 	lb := proxy.New(p, a, proxyOpts...)
@@ -246,9 +303,18 @@ func main() {
 		"port", cfg.Server.Port,
 		"algorithm", cfg.Pool.Algorithm,
 		"backends", len(p.Backends()),
+		"tls", cfg.TLS.Enabled,
 	)
-	if err := mainSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		slog.Error("server error", "error", err)
-		os.Exit(1)
+	if cfg.TLS.Enabled {
+		mainSrv.TLSConfig = &tls.Config{MinVersion: parseTLSVersion(cfg.TLS.MinVersion)}
+		if err := mainSrv.ListenAndServeTLS(cfg.TLS.CertFile, cfg.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		if err := mainSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
 	}
 }

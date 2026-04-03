@@ -19,6 +19,8 @@ type Config struct {
 	RateLimit      RateLimitConfig
 	Metrics        MetricsConfig
 	CircuitBreaker CircuitBreakerConfig
+	TLS            TLSConfig
+	StickySession  StickySessionConfig
 }
 
 type ServerConfig struct {
@@ -66,6 +68,19 @@ type CircuitBreakerConfig struct {
 	Timeout          time.Duration `yaml:"timeout"`           // default 30s
 }
 
+type TLSConfig struct {
+	Enabled    bool   `yaml:"enabled"`     // default false
+	CertFile   string `yaml:"cert_file"`   // path to PEM certificate
+	KeyFile    string `yaml:"key_file"`    // path to PEM private key
+	MinVersion string `yaml:"min_version"` // "1.2" or "1.3"; default "1.2"
+}
+
+type StickySessionConfig struct {
+	Enabled    bool          `yaml:"enabled"`     // default false
+	CookieName string        `yaml:"cookie_name"` // default "golb_backend"
+	TTL        time.Duration `yaml:"ttl"`         // default 1h
+}
+
 // Defaults returns a Config pre-filled with production defaults.
 func Defaults() Config {
 	return Config{
@@ -94,6 +109,15 @@ func Defaults() Config {
 			FailureThreshold: 5,
 			SuccessThreshold: 2,
 			Timeout:          30 * time.Second,
+		},
+		TLS: TLSConfig{
+			Enabled:    false,
+			MinVersion: "1.2",
+		},
+		StickySession: StickySessionConfig{
+			Enabled:    false,
+			CookieName: "golb_backend",
+			TTL:        1 * time.Hour,
 		},
 	}
 }
@@ -138,6 +162,17 @@ type fileConfig struct {
 		SuccessThreshold *int   `yaml:"success_threshold"`
 		Timeout          string `yaml:"timeout"`
 	} `yaml:"circuit_breaker"`
+	TLS struct {
+		Enabled    *bool  `yaml:"enabled"`
+		CertFile   string `yaml:"cert_file"`
+		KeyFile    string `yaml:"key_file"`
+		MinVersion string `yaml:"min_version"`
+	} `yaml:"tls"`
+	StickySession struct {
+		Enabled    *bool  `yaml:"enabled"`
+		CookieName string `yaml:"cookie_name"`
+		TTL        string `yaml:"ttl"`
+	} `yaml:"sticky_sessions"`
 }
 
 // Load reads the YAML file at path (if non-empty), then applies CLI overrides.
@@ -253,6 +288,37 @@ func applyFileConfig(cfg *Config, fc *fileConfig) error {
 		}
 		cfg.CircuitBreaker.Timeout = d
 	}
+	// TLS
+	if fc.TLS.Enabled != nil {
+		cfg.TLS.Enabled = *fc.TLS.Enabled
+	}
+	if fc.TLS.CertFile != "" {
+		cfg.TLS.CertFile = fc.TLS.CertFile
+	}
+	if fc.TLS.KeyFile != "" {
+		cfg.TLS.KeyFile = fc.TLS.KeyFile
+	}
+	if fc.TLS.MinVersion != "" {
+		v := strings.TrimSpace(fc.TLS.MinVersion)
+		if v != "1.2" && v != "1.3" {
+			return fmt.Errorf("invalid tls.min_version %q: must be \"1.2\" or \"1.3\"", fc.TLS.MinVersion)
+		}
+		cfg.TLS.MinVersion = v
+	}
+	// Sticky Sessions
+	if fc.StickySession.Enabled != nil {
+		cfg.StickySession.Enabled = *fc.StickySession.Enabled
+	}
+	if fc.StickySession.CookieName != "" {
+		cfg.StickySession.CookieName = fc.StickySession.CookieName
+	}
+	if fc.StickySession.TTL != "" {
+		d, err := time.ParseDuration(fc.StickySession.TTL)
+		if err != nil {
+			return fmt.Errorf("invalid sticky_sessions.ttl %q: %w", fc.StickySession.TTL, err)
+		}
+		cfg.StickySession.TTL = d
+	}
 	return nil
 }
 
@@ -277,6 +343,13 @@ func applyCLI(cfg *Config, args []string) error {
 		cbFailureThreshold int
 		cbSuccessThreshold int
 		cbTimeout          time.Duration
+		tlsEnabled         bool
+		tlsCert            string
+		tlsKey             string
+		tlsMinVersion      string
+		stickyEnabled      bool
+		stickyCookieName   string
+		stickyTTL          time.Duration
 	)
 
 	fs.IntVar(&port, "port", 0, "Port to listen on")
@@ -296,6 +369,13 @@ func applyCLI(cfg *Config, args []string) error {
 	fs.IntVar(&cbFailureThreshold, "cb-failure-threshold", cfg.CircuitBreaker.FailureThreshold, "Circuit breaker failure threshold")
 	fs.IntVar(&cbSuccessThreshold, "cb-success-threshold", cfg.CircuitBreaker.SuccessThreshold, "Circuit breaker success threshold")
 	fs.DurationVar(&cbTimeout, "cb-timeout", cfg.CircuitBreaker.Timeout, "Circuit breaker open timeout")
+	fs.BoolVar(&tlsEnabled, "tls-enabled", cfg.TLS.Enabled, "Enable TLS termination")
+	fs.StringVar(&tlsCert, "tls-cert", cfg.TLS.CertFile, "Path to TLS certificate PEM file")
+	fs.StringVar(&tlsKey, "tls-key", cfg.TLS.KeyFile, "Path to TLS private key PEM file")
+	fs.StringVar(&tlsMinVersion, "tls-min-version", cfg.TLS.MinVersion, "Minimum TLS version: 1.2 or 1.3")
+	fs.BoolVar(&stickyEnabled, "sticky-enabled", cfg.StickySession.Enabled, "Enable sticky sessions")
+	fs.StringVar(&stickyCookieName, "sticky-cookie-name", cfg.StickySession.CookieName, "Sticky session cookie name")
+	fs.DurationVar(&stickyTTL, "sticky-ttl", cfg.StickySession.TTL, "Sticky session cookie TTL")
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parsing CLI flags: %w", err)
@@ -343,7 +423,24 @@ func applyCLI(cfg *Config, args []string) error {
 			cfg.CircuitBreaker.SuccessThreshold = cbSuccessThreshold
 		case "cb-timeout":
 			cfg.CircuitBreaker.Timeout = cbTimeout
+		case "tls-enabled":
+			cfg.TLS.Enabled = tlsEnabled
+		case "tls-cert":
+			cfg.TLS.CertFile = tlsCert
+		case "tls-key":
+			cfg.TLS.KeyFile = tlsKey
+		case "tls-min-version":
+			cfg.TLS.MinVersion = strings.TrimSpace(tlsMinVersion)
+		case "sticky-enabled":
+			cfg.StickySession.Enabled = stickyEnabled
+		case "sticky-cookie-name":
+			cfg.StickySession.CookieName = stickyCookieName
+		case "sticky-ttl":
+			cfg.StickySession.TTL = stickyTTL
 		}
 	})
+	if v := cfg.TLS.MinVersion; v != "" && v != "1.2" && v != "1.3" {
+		return fmt.Errorf("invalid tls.min_version %q: must be \"1.2\" or \"1.3\"", v)
+	}
 	return nil
 }

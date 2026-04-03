@@ -290,3 +290,162 @@ func TestLoad_CircuitBreakerInvalidThreshold_ReturnsError(t *testing.T) {
 		t.Error("expected error for failure_threshold=0 when enabled")
 	}
 }
+
+// --- TLS config tests ---
+
+func TestDefaults_TLS(t *testing.T) {
+	cfg := config.Defaults()
+	if cfg.TLS.Enabled {
+		t.Error("TLS should be disabled by default")
+	}
+	if cfg.TLS.MinVersion != "1.2" {
+		t.Errorf("TLS min version: want 1.2, got %s", cfg.TLS.MinVersion)
+	}
+	if cfg.TLS.CertFile != "" {
+		t.Errorf("TLS cert: want empty, got %s", cfg.TLS.CertFile)
+	}
+	if cfg.TLS.KeyFile != "" {
+		t.Errorf("TLS key: want empty, got %s", cfg.TLS.KeyFile)
+	}
+}
+
+func TestLoad_TLS_FromYAML(t *testing.T) {
+	path := writeYAML(t, `
+tls:
+  enabled: true
+  cert_file: /etc/golb/cert.pem
+  key_file: /etc/golb/key.pem
+  min_version: "1.3"
+`)
+	cfg, err := config.Load(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.TLS.Enabled {
+		t.Error("TLS enabled: want true")
+	}
+	if cfg.TLS.CertFile != "/etc/golb/cert.pem" {
+		t.Errorf("TLS cert: want /etc/golb/cert.pem, got %s", cfg.TLS.CertFile)
+	}
+	if cfg.TLS.KeyFile != "/etc/golb/key.pem" {
+		t.Errorf("TLS key: want /etc/golb/key.pem, got %s", cfg.TLS.KeyFile)
+	}
+	if cfg.TLS.MinVersion != "1.3" {
+		t.Errorf("TLS min version: want 1.3, got %s", cfg.TLS.MinVersion)
+	}
+}
+
+func TestLoad_TLS_InvalidMinVersion_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+tls:
+  min_version: "1.1"
+`)
+	_, err := config.Load(path, nil)
+	if err == nil {
+		t.Fatal("expected error for invalid tls.min_version")
+	}
+}
+
+func TestLoad_TLS_CLIOverridesYAML(t *testing.T) {
+	path := writeYAML(t, `
+tls:
+  enabled: false
+  cert_file: /etc/golb/cert.pem
+  key_file: /etc/golb/key.pem
+`)
+	cfg, err := config.Load(path, []string{
+		"--tls-enabled=true",
+		"--tls-cert=/new/cert.pem",
+		"--tls-key=/new/key.pem",
+		"--tls-min-version=1.3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.TLS.Enabled {
+		t.Error("CLI --tls-enabled should override YAML: want true")
+	}
+	if cfg.TLS.CertFile != "/new/cert.pem" {
+		t.Errorf("CLI --tls-cert should override YAML: want /new/cert.pem, got %s", cfg.TLS.CertFile)
+	}
+	if cfg.TLS.KeyFile != "/new/key.pem" {
+		t.Errorf("CLI --tls-key should override YAML: want /new/key.pem, got %s", cfg.TLS.KeyFile)
+	}
+	if cfg.TLS.MinVersion != "1.3" {
+		t.Errorf("CLI --tls-min-version should override YAML: want 1.3, got %s", cfg.TLS.MinVersion)
+	}
+}
+
+// --- Sticky session config tests ---
+
+func TestDefaults_StickySession(t *testing.T) {
+	cfg := config.Defaults()
+	if cfg.StickySession.Enabled {
+		t.Error("sticky sessions should be disabled by default")
+	}
+	if cfg.StickySession.CookieName != "golb_backend" {
+		t.Errorf("sticky cookie name: want golb_backend, got %s", cfg.StickySession.CookieName)
+	}
+	if cfg.StickySession.TTL != 1*time.Hour {
+		t.Errorf("sticky TTL: want 1h, got %s", cfg.StickySession.TTL)
+	}
+}
+
+func TestLoad_StickySession_FromYAML(t *testing.T) {
+	path := writeYAML(t, `
+sticky_sessions:
+  enabled: true
+  cookie_name: my_session
+  ttl: 30m
+`)
+	cfg, err := config.Load(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.StickySession.Enabled {
+		t.Error("sticky enabled: want true")
+	}
+	if cfg.StickySession.CookieName != "my_session" {
+		t.Errorf("sticky cookie name: want my_session, got %s", cfg.StickySession.CookieName)
+	}
+	if cfg.StickySession.TTL != 30*time.Minute {
+		t.Errorf("sticky TTL: want 30m, got %s", cfg.StickySession.TTL)
+	}
+}
+
+func TestLoad_StickySession_CLIOverridesYAML(t *testing.T) {
+	path := writeYAML(t, `
+sticky_sessions:
+  enabled: false
+  cookie_name: golb_backend
+  ttl: 1h
+`)
+	cfg, err := config.Load(path, []string{
+		"--sticky-enabled=true",
+		"--sticky-cookie-name=custom_cookie",
+		"--sticky-ttl=15m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.StickySession.Enabled {
+		t.Error("CLI --sticky-enabled should override YAML: want true")
+	}
+	if cfg.StickySession.CookieName != "custom_cookie" {
+		t.Errorf("CLI --sticky-cookie-name should override YAML: want custom_cookie, got %s", cfg.StickySession.CookieName)
+	}
+	if cfg.StickySession.TTL != 15*time.Minute {
+		t.Errorf("CLI --sticky-ttl should override YAML: want 15m, got %s", cfg.StickySession.TTL)
+	}
+}
+
+func TestLoad_StickySession_InvalidTTL_ReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+sticky_sessions:
+  ttl: bogus
+`)
+	_, err := config.Load(path, nil)
+	if err == nil {
+		t.Fatal("expected error for invalid sticky_sessions.ttl")
+	}
+}

@@ -7,9 +7,11 @@ import (
 	"net/url"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/VijayGohel/go-lb/internal/algo"
 	"github.com/VijayGohel/go-lb/internal/backend"
+	"github.com/VijayGohel/go-lb/internal/circuitbreaker"
 	"github.com/VijayGohel/go-lb/internal/pool"
 	"github.com/VijayGohel/go-lb/internal/proxy"
 )
@@ -169,5 +171,87 @@ func TestLb_DeadBackendSkipped(t *testing.T) {
 		if rw.Code != http.StatusOK {
 			t.Errorf("request %d: expected 200, got %d — dead backend not skipped", i, rw.Code)
 		}
+	}
+}
+
+func TestLb_CircuitBreaker_OpenBackendSkipped(t *testing.T) {
+	alive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer alive.Close()
+
+	p := &pool.ServerPool{}
+	rr, _ := algo.New("round_robin")
+
+	cbReg := circuitbreaker.NewRegistry(circuitbreaker.Config{
+		FailureThreshold: 1,
+		SuccessThreshold: 1,
+		Timeout:          10 * time.Second,
+	})
+	lb := proxy.New(p, rr, proxy.WithCircuitBreaker(cbReg))
+
+	b1 := makeBackend("http://localhost:19990", true) // will be circuit-opened
+	b2 := makeBackend(alive.URL, true)
+	lb.SetupProxy(b1)
+	lb.SetupProxy(b2)
+	p.AddBackend(b1)
+	p.AddBackend(b2)
+
+	// Trip circuit on b1
+	cbReg.Get("http://localhost:19990").RecordFailure()
+	if cbReg.Get("http://localhost:19990").State() != circuitbreaker.Open {
+		t.Fatal("expected b1 circuit to be Open")
+	}
+
+	// All requests should go to b2 (b1 is circuit-open)
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rw := httptest.NewRecorder()
+		lb.ServeHTTP(rw, req)
+		if rw.Code != http.StatusOK {
+			t.Errorf("request %d: expected 200, got %d", i, rw.Code)
+		}
+	}
+}
+
+func TestLb_CircuitBreaker_SuccessClosesCircuit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	p := &pool.ServerPool{}
+	rr, _ := algo.New("round_robin")
+
+	cbReg := circuitbreaker.NewRegistry(circuitbreaker.Config{
+		FailureThreshold: 2,
+		SuccessThreshold: 1,
+		Timeout:          10 * time.Millisecond,
+	})
+	lb := proxy.New(p, rr, proxy.WithCircuitBreaker(cbReg))
+
+	b := makeBackend(srv.URL, true)
+	lb.SetupProxy(b)
+	p.AddBackend(b)
+
+	// Trip circuit
+	cbReg.Get(srv.URL).RecordFailure()
+	cbReg.Get(srv.URL).RecordFailure()
+	if cbReg.Get(srv.URL).State() != circuitbreaker.Open {
+		t.Fatal("expected Open")
+	}
+
+	// Wait for timeout to allow half-open
+	time.Sleep(20 * time.Millisecond)
+
+	// Successful request should close the circuit
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rw := httptest.NewRecorder()
+	lb.ServeHTTP(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rw.Code)
+	}
+	if cbReg.Get(srv.URL).State() != circuitbreaker.Closed {
+		t.Errorf("expected Closed after successful probe, got %s", cbReg.Get(srv.URL).State())
 	}
 }

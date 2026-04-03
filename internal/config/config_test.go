@@ -218,3 +218,75 @@ pool:
 		t.Errorf("unset CLI flag should not override YAML: got %s", cfg.Pool.Algorithm)
 	}
 }
+
+func TestDefaults_CircuitBreaker(t *testing.T) {
+	cfg := config.Defaults()
+	if cfg.CircuitBreaker.Enabled {
+		t.Error("default cb.enabled: want false, got true")
+	}
+	if cfg.CircuitBreaker.FailureThreshold != 5 {
+		t.Errorf("default cb.failure_threshold: want 5, got %d", cfg.CircuitBreaker.FailureThreshold)
+	}
+	if cfg.CircuitBreaker.SuccessThreshold != 2 {
+		t.Errorf("default cb.success_threshold: want 2, got %d", cfg.CircuitBreaker.SuccessThreshold)
+	}
+	if cfg.CircuitBreaker.Timeout != 30*time.Second {
+		t.Errorf("default cb.timeout: want 30s, got %s", cfg.CircuitBreaker.Timeout)
+	}
+}
+
+func TestLoad_CircuitBreakerYAML(t *testing.T) {
+	yaml := []byte("circuit_breaker:\n  enabled: true\n  failure_threshold: 10\n  success_threshold: 3\n  timeout: 1m\n")
+	dir := t.TempDir()
+	f := filepath.Join(dir, "cfg.yaml")
+	if err := os.WriteFile(f, yaml, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(f, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CircuitBreaker.Enabled {
+		t.Error("cb.enabled from YAML: want true")
+	}
+	if cfg.CircuitBreaker.FailureThreshold != 10 {
+		t.Errorf("cb.failure_threshold: want 10, got %d", cfg.CircuitBreaker.FailureThreshold)
+	}
+	if cfg.CircuitBreaker.Timeout != time.Minute {
+		t.Errorf("cb.timeout: want 1m, got %s", cfg.CircuitBreaker.Timeout)
+	}
+}
+
+func TestLoad_CircuitBreakerCLIOverrides(t *testing.T) {
+	cfg, err := config.Load("", []string{
+		"--backends=http://localhost:8081",
+		"--cb-enabled=true",
+		"--cb-failure-threshold=8",
+		"--cb-timeout=45s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CircuitBreaker.Enabled {
+		t.Error("cb.enabled from CLI: want true")
+	}
+	if cfg.CircuitBreaker.FailureThreshold != 8 {
+		t.Errorf("cb.failure_threshold from CLI: want 8, got %d", cfg.CircuitBreaker.FailureThreshold)
+	}
+	if cfg.CircuitBreaker.Timeout != 45*time.Second {
+		t.Errorf("cb.timeout from CLI: want 45s, got %s", cfg.CircuitBreaker.Timeout)
+	}
+}
+
+func TestLoad_CircuitBreakerInvalidThreshold_ReturnsError(t *testing.T) {
+	yaml := []byte("circuit_breaker:\n  enabled: true\n  failure_threshold: 0\n")
+	dir := t.TempDir()
+	f := filepath.Join(dir, "cfg.yaml")
+	if err := os.WriteFile(f, yaml, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := config.Load(f, nil)
+	if err == nil {
+		t.Error("expected error for failure_threshold=0 when enabled")
+	}
+}

@@ -27,3 +27,7 @@ rate_limit:
   requests_per_second: 1000    # token refill rate
   burst: 200                   # max burst size
   per_ip: true                 # per-IP (true) or global (false)
+
+metrics:
+  enabled: true                # enable Prometheus metrics at /metrics
+  port: 0                      # 0 = serve on admin port; set to expose on a dedicated port

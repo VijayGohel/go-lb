@@ -13,6 +13,7 @@ import (
 
 	"github.com/VijayGohel/go-lb/internal/algo"
 	"github.com/VijayGohel/go-lb/internal/backend"
+	"github.com/VijayGohel/go-lb/internal/metrics"
 	"github.com/VijayGohel/go-lb/internal/pool"
 )
 
@@ -127,7 +128,15 @@ func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	peer.IncrConns()
+	// Track active connections in metrics alongside the backend counter.
+	// Note: on error-handler re-dispatch, this defer runs when the current
+	// frame returns, which is correct for the proxy connection count but may
+	// briefly overcount metrics active_connections until the inner frame's
+	// defer fires. This is an acceptable trade-off vs. adding complex
+	// coordination between frames.
+	metrics.IncrActiveConns(peer.URL.String())
 	defer peer.DecrConns()
+	defer metrics.DecrActiveConns(peer.URL.String())
 
 	requestID := getOrCreateRequestID(r)
 	if _, ok := r.Context().Value(requestIDKey).(string); !ok {
@@ -137,10 +146,20 @@ func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 	peer.ReverseProxy.ServeHTTP(rw, r)
+	duration := time.Since(start)
+
+	// Only record metrics when the current attempt number matches the
+	// post-proxy context value. If the error handler performed a backend
+	// switch (incrementing attempts), the inner recursive call already
+	// recorded — so the outer frame must NOT double-count.
+	if getAttemptsFromContext(r) == attempts {
+		metrics.RecordRequest(peer.URL.String(), rw.statusCode, duration)
+	}
+
 	slog.Info("request",
 		"request_id", requestID,
 		"backend", peer.URL.String(),
-		"latency_ms", time.Since(start).Milliseconds(),
+		"latency_ms", duration.Milliseconds(),
 		"status", rw.statusCode,
 		"attempt", attempts+1,
 	)

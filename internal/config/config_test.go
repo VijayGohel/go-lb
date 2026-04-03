@@ -158,6 +158,52 @@ func TestLoad_MissingYAMLFile_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestDefaults_Metrics(t *testing.T) {
+	cfg := config.Defaults()
+	if !cfg.Metrics.Enabled {
+		t.Error("default metrics.enabled: want true, got false")
+	}
+	if cfg.Metrics.Port != 0 {
+		t.Errorf("default metrics.port: want 0, got %d", cfg.Metrics.Port)
+	}
+}
+
+func TestLoad_MetricsYAML(t *testing.T) {
+	path := writeYAML(t, `
+metrics:
+  enabled: false
+  port: 9191
+`)
+	cfg, err := config.Load(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Metrics.Enabled {
+		t.Error("metrics.enabled: want false, got true")
+	}
+	if cfg.Metrics.Port != 9191 {
+		t.Errorf("metrics.port: want 9191, got %d", cfg.Metrics.Port)
+	}
+}
+
+func TestLoad_MetricsCLIOverrides(t *testing.T) {
+	path := writeYAML(t, `
+metrics:
+  enabled: true
+  port: 9191
+`)
+	cfg, err := config.Load(path, []string{"--metrics-enabled=false", "--metrics-port=7070"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Metrics.Enabled {
+		t.Error("CLI --metrics-enabled should override YAML: want false, got true")
+	}
+	if cfg.Metrics.Port != 7070 {
+		t.Errorf("CLI --metrics-port should override YAML: want 7070, got %d", cfg.Metrics.Port)
+	}
+}
+
 func TestLoad_UnsetCLIFlagsDoNotOverrideYAML(t *testing.T) {
 	// Only --port is set; --algorithm must remain from YAML.
 	path := writeYAML(t, `

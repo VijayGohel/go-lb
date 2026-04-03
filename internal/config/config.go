@@ -213,10 +213,10 @@ func applyCLI(cfg *Config, args []string) error {
 	fs.DurationVar(&healthInterval, "health-interval", 0, "Health check interval")
 	fs.DurationVar(&healthTimeout, "health-timeout", 0, "Health check timeout")
 	fs.IntVar(&adminPort, "admin-port", 0, "Admin server port (0=disabled)")
-	fs.BoolVar(&rlEnabled, "rl-enabled", false, "Enable rate limiting")
-	fs.Float64Var(&rlRPS, "rl-rps", 0, "Rate limit: requests per second")
-	fs.IntVar(&rlBurst, "rl-burst", 0, "Rate limit: burst size")
-	fs.BoolVar(&rlPerIP, "rl-per-ip", false, "Rate limit: per-IP mode")
+	fs.BoolVar(&rlEnabled, "rl-enabled", cfg.RateLimit.Enabled, "Enable rate limiting")
+	fs.Float64Var(&rlRPS, "rl-rps", cfg.RateLimit.RequestsPerSecond, "Rate limit: requests per second")
+	fs.IntVar(&rlBurst, "rl-burst", cfg.RateLimit.Burst, "Rate limit: burst size")
+	fs.BoolVar(&rlPerIP, "rl-per-ip", cfg.RateLimit.PerIP, "Rate limit: per-IP mode")
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parsing CLI flags: %w", err)

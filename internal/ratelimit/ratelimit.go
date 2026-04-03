@@ -135,7 +135,10 @@ func (l *Limiter) Allow(ip string) bool {
 func (l *Limiter) Middleware() middleware.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := clientIP(r)
+			var ip string
+			if l.perIPOn {
+				ip = clientIP(r)
+			}
 			if !l.Allow(ip) {
 				retryAfter := l.retryAfter(ip)
 				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))

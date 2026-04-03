@@ -144,9 +144,10 @@ func (b *Breaker) State() State {
 	return b.state
 }
 
-// Eligible reports whether the breaker would allow a request without
+// Eligible reports whether the breaker would likely allow a request without
 // consuming state. Use this for filtering backends before selection.
-// Closed and HalfOpen are eligible; Open is eligible only if timeout has elapsed.
+// Closed is always eligible. Open is eligible only if timeout has elapsed.
+// HalfOpen is eligible only if the probe permit is still available.
 func (b *Breaker) Eligible() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -156,7 +157,7 @@ func (b *Breaker) Eligible() bool {
 	case Open:
 		return time.Since(b.lastFailure) >= b.timeout
 	case HalfOpen:
-		return true
+		return b.halfOpenPermit.Load()
 	default:
 		return true
 	}

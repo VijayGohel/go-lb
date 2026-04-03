@@ -134,8 +134,8 @@ type fileConfig struct {
 	} `yaml:"metrics"`
 	CircuitBreaker struct {
 		Enabled          *bool  `yaml:"enabled"`
-		FailureThreshold int    `yaml:"failure_threshold"`
-		SuccessThreshold int    `yaml:"success_threshold"`
+		FailureThreshold *int   `yaml:"failure_threshold"`
+		SuccessThreshold *int   `yaml:"success_threshold"`
 		Timeout          string `yaml:"timeout"`
 	} `yaml:"circuit_breaker"`
 }
@@ -240,11 +240,11 @@ func applyFileConfig(cfg *Config, fc *fileConfig) error {
 	if fc.CircuitBreaker.Enabled != nil {
 		cfg.CircuitBreaker.Enabled = *fc.CircuitBreaker.Enabled
 	}
-	if fc.CircuitBreaker.FailureThreshold != 0 {
-		cfg.CircuitBreaker.FailureThreshold = fc.CircuitBreaker.FailureThreshold
+	if fc.CircuitBreaker.FailureThreshold != nil {
+		cfg.CircuitBreaker.FailureThreshold = *fc.CircuitBreaker.FailureThreshold
 	}
-	if fc.CircuitBreaker.SuccessThreshold != 0 {
-		cfg.CircuitBreaker.SuccessThreshold = fc.CircuitBreaker.SuccessThreshold
+	if fc.CircuitBreaker.SuccessThreshold != nil {
+		cfg.CircuitBreaker.SuccessThreshold = *fc.CircuitBreaker.SuccessThreshold
 	}
 	if fc.CircuitBreaker.Timeout != "" {
 		d, err := time.ParseDuration(fc.CircuitBreaker.Timeout)

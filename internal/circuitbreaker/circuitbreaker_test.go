@@ -208,13 +208,21 @@ func TestEligible_Open_AfterTimeout(t *testing.T) {
 	}
 }
 
-func TestEligible_HalfOpen(t *testing.T) {
+func TestEligible_HalfOpen_WithPermit(t *testing.T) {
 	cb := circuitbreaker.NewBreaker(1, 1, 20*time.Millisecond)
 	cb.RecordFailure() // → Open
 	time.Sleep(30 * time.Millisecond)
-	cb.Allow() // → HalfOpen, consume permit
+
+	// Before Allow(): permit available, Eligible returns true
 	if !cb.Eligible() {
-		t.Fatal("HalfOpen breaker should be eligible")
+		t.Fatal("HalfOpen with permit should be eligible")
+	}
+
+	cb.Allow() // → HalfOpen, consume permit
+
+	// After Allow(): permit consumed, Eligible returns false
+	if cb.Eligible() {
+		t.Fatal("HalfOpen with consumed permit should NOT be eligible")
 	}
 }
 

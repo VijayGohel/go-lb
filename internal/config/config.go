@@ -444,3 +444,22 @@ func applyCLI(cfg *Config, args []string) error {
 	}
 	return nil
 }
+
+// LoadFile reads the YAML config file at path and returns a Config with
+// defaults + file overrides applied. CLI overrides are NOT applied — this
+// is the reload path where the file is the source of truth.
+func LoadFile(path string) (Config, error) {
+	cfg := Defaults()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("reading config file: %w", err)
+	}
+	var fc fileConfig
+	if err := yaml.Unmarshal(data, &fc); err != nil {
+		return Config{}, fmt.Errorf("parsing config file: %w", err)
+	}
+	if err := applyFileConfig(&cfg, &fc); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}

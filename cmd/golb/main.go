@@ -25,6 +25,7 @@ import (
 	"github.com/VijayGohel/go-lb/internal/pool"
 	"github.com/VijayGohel/go-lb/internal/proxy"
 	"github.com/VijayGohel/go-lb/internal/ratelimit"
+	"github.com/VijayGohel/go-lb/internal/reload"
 	"github.com/VijayGohel/go-lb/internal/sticky"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -276,10 +277,37 @@ func main() {
 		}()
 	}
 
+	// Set up hot reload applier for SIGHUP.
+	applier := reload.NewApplier(p, lb, hc)
+	currentCfg := cfg
+
 	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
-		<-quit
+		for sig := range quit {
+			if sig == syscall.SIGHUP {
+				if cfgPath == "" {
+					slog.Warn("SIGHUP received but no config file was specified; ignoring")
+					continue
+				}
+				slog.Info("SIGHUP received, reloading config", "path", cfgPath)
+				newCfg, err := config.LoadFile(cfgPath)
+				if err != nil {
+					slog.Error("config reload failed", "error", err)
+					continue
+				}
+				diff := reload.ComputeDiff(currentCfg, newCfg)
+				if err := applier.Apply(diff, newCfg); err != nil {
+					slog.Error("config apply failed", "error", err)
+					continue
+				}
+				currentCfg = newCfg
+				slog.Info("config reloaded successfully")
+				continue
+			}
+			// SIGINT / SIGTERM → graceful shutdown
+			break
+		}
 		slog.Info("shutting down gracefully")
 		cancel()
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 30*time.Second)

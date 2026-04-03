@@ -449,3 +449,61 @@ sticky_sessions:
 		t.Fatal("expected error for invalid sticky_sessions.ttl")
 	}
 }
+
+func TestLoadFile_Success(t *testing.T) {
+	yaml := []byte("server:\n  port: 4040\npool:\n  algorithm: least_connections\n  backends:\n    - url: http://localhost:9001\n")
+	dir := t.TempDir()
+	f := filepath.Join(dir, "cfg.yaml")
+	if err := os.WriteFile(f, yaml, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.Port != 4040 {
+		t.Errorf("port: want 4040, got %d", cfg.Server.Port)
+	}
+	if cfg.Pool.Algorithm != "least_connections" {
+		t.Errorf("algorithm: want least_connections, got %s", cfg.Pool.Algorithm)
+	}
+}
+
+func TestLoadFile_MissingFile(t *testing.T) {
+	_, err := config.LoadFile("/nonexistent/path.yaml")
+	if err == nil {
+		t.Error("expected error for missing file")
+	}
+}
+
+func TestLoadFile_InvalidYAML(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(f, []byte("{{{{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := config.LoadFile(f)
+	if err == nil {
+		t.Error("expected error for invalid YAML")
+	}
+}
+
+func TestLoadFile_DefaultsApplied(t *testing.T) {
+	yaml := []byte("server:\n  port: 5050\n")
+	dir := t.TempDir()
+	f := filepath.Join(dir, "cfg.yaml")
+	if err := os.WriteFile(f, yaml, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unspecified fields should have defaults
+	if cfg.Admin.Port != 9090 {
+		t.Errorf("admin.port default: want 9090, got %d", cfg.Admin.Port)
+	}
+	if cfg.HealthCheck.Path != "/health" {
+		t.Errorf("health.path default: want /health, got %s", cfg.HealthCheck.Path)
+	}
+}

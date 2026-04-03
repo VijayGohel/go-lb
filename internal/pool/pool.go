@@ -64,3 +64,14 @@ func (s *ServerPool) MarkBackendStatus(backendURL *url.URL, alive bool) {
 		}
 	}
 }
+
+// BackendURLs returns the URL strings of all registered backends.
+func (s *ServerPool) BackendURLs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	urls := make([]string, len(s.backends))
+	for i, b := range s.backends {
+		urls[i] = b.URL.String()
+	}
+	return urls
+}

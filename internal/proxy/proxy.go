@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"sync"
 	"time"
 
 	"github.com/VijayGohel/go-lb/internal/algo"
@@ -59,8 +60,16 @@ func WithStickySession(a *sticky.Affinity) Option {
 type LoadBalancer struct {
 	pool       *pool.ServerPool
 	algo       algo.Algorithm
+	mu         sync.RWMutex
 	cbRegistry *circuitbreaker.Registry
 	sticky     *sticky.Affinity
+}
+
+// SetAlgorithm atomically swaps the load balancing algorithm.
+func (lb *LoadBalancer) SetAlgorithm(a algo.Algorithm) {
+	lb.mu.Lock()
+	lb.algo = a
+	lb.mu.Unlock()
 }
 
 // New creates a LoadBalancer backed by the given pool and algorithm.
@@ -176,7 +185,10 @@ func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Fall through to algorithm selection if sticky miss or backend dead.
 	if peer == nil {
-		peer = lb.algo.Next(backends)
+		lb.mu.RLock()
+		a := lb.algo
+		lb.mu.RUnlock()
+		peer = a.Next(backends)
 	}
 	if peer == nil {
 		http.Error(w, "Service not available", http.StatusServiceUnavailable)

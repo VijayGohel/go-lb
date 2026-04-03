@@ -1,3 +1,8 @@
+# GoLB Configuration
+# Hot reload: send SIGHUP to re-read this file without restart.
+#   kill -HUP $(pidof golb)
+# Note: TLS changes require a full restart.
+
 server:
   port: 3030
 

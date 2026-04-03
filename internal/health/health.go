@@ -134,7 +134,26 @@ func (hc *HealthChecker) recordFailure(b *backend.Backend) {
 	}
 }
 
+// UpdateConfig updates health check parameters at runtime (used by hot reload).
+func (hc *HealthChecker) UpdateConfig(path string, interval, timeout time.Duration, unhealthyThreshold, healthyThreshold int) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	hc.path = path
+	hc.interval = interval
+	hc.timeout = timeout
+	hc.client = &http.Client{Timeout: timeout}
+	if unhealthyThreshold < 1 {
+		unhealthyThreshold = 1
+	}
+	if healthyThreshold < 1 {
+		healthyThreshold = 1
+	}
+	hc.unhealthyThreshold = unhealthyThreshold
+	hc.healthyThreshold = healthyThreshold
+}
+
 // Start runs health checks on all pool backends every interval until ctx is cancelled.
+// It picks up interval changes from UpdateConfig on each tick.
 func (hc *HealthChecker) Start(ctx context.Context) {
 	ticker := time.NewTicker(hc.interval)
 	defer ticker.Stop()

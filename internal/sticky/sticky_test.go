@@ -22,7 +22,7 @@ func TestSetCookie_Attributes(t *testing.T) {
 	c := cookies[0]
 
 	// Value should be base64-encoded backend URL
-	decoded, err := base64.StdEncoding.DecodeString(c.Value)
+	decoded, err := base64.RawURLEncoding.DecodeString(c.Value)
 	if err != nil {
 		t.Fatalf("cookie value is not valid base64: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestSetCookie_Attributes(t *testing.T) {
 
 func TestFromRequest_Decodes(t *testing.T) {
 	a := sticky.New("golb_backend", 1*time.Hour)
-	encoded := base64.StdEncoding.EncodeToString([]byte("http://localhost:8081"))
+	encoded := base64.RawURLEncoding.EncodeToString([]byte("http://localhost:8081"))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: "golb_backend", Value: encoded})
 
@@ -123,7 +123,7 @@ func TestCustomName(t *testing.T) {
 
 func TestWrongName(t *testing.T) {
 	a := sticky.New("golb_backend", 1*time.Hour)
-	encoded := base64.StdEncoding.EncodeToString([]byte("http://localhost:8081"))
+	encoded := base64.RawURLEncoding.EncodeToString([]byte("http://localhost:8081"))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: "wrong_name", Value: encoded})
 

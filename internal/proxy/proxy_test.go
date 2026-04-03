@@ -342,7 +342,7 @@ func TestLb_StickyFallback_DeadBackendFallsToAlgo(t *testing.T) {
 
 	// Send a request with a cookie pointing to the dead backend (base64-encoded with StdEncoding).
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	encodedDead := base64.StdEncoding.EncodeToString([]byte("http://localhost:19996"))
+	encodedDead := base64.RawURLEncoding.EncodeToString([]byte("http://localhost:19996"))
 	req.AddCookie(&http.Cookie{Name: "golb_backend", Value: encodedDead})
 	rw := httptest.NewRecorder()
 	lb.ServeHTTP(rw, req)
@@ -354,7 +354,7 @@ func TestLb_StickyFallback_DeadBackendFallsToAlgo(t *testing.T) {
 	// Verify cookie now points to the alive backend.
 	for _, c := range rw.Result().Cookies() {
 		if c.Name == "golb_backend" {
-			decoded, err := base64.StdEncoding.DecodeString(c.Value)
+			decoded, err := base64.RawURLEncoding.DecodeString(c.Value)
 			if err != nil {
 				t.Fatalf("cookie value not valid base64: %v", err)
 			}
@@ -405,7 +405,7 @@ func TestLb_Sticky10Requests_SameBackend(t *testing.T) {
 	}
 
 	// Determine which backend was chosen (decode base64 cookie value).
-	decodedPinned, err := base64.StdEncoding.DecodeString(stickyCookie.Value)
+	decodedPinned, err := base64.RawURLEncoding.DecodeString(stickyCookie.Value)
 	if err != nil {
 		t.Fatalf("cookie value not valid base64: %v", err)
 	}

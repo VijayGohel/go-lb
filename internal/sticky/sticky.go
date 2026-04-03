@@ -2,9 +2,20 @@ package sticky
 
 import (
 	"encoding/base64"
+	"math"
 	"net/http"
 	"time"
 )
+
+// maxAge returns the TTL as an integer number of seconds, rounded up to at
+// least 1 so sub-second durations don't produce a session cookie (MaxAge=0).
+func maxAge(ttl time.Duration) int {
+	s := int(math.Ceil(ttl.Seconds()))
+	if s < 1 {
+		s = 1
+	}
+	return s
+}
 
 // Affinity manages cookie-based sticky sessions, mapping clients to backends
 // via a base64-encoded cookie containing the backend URL.
@@ -38,7 +49,7 @@ func (a *Affinity) FromRequest(r *http.Request) string {
 	if err != nil || c.Value == "" {
 		return ""
 	}
-	raw, err := base64.StdEncoding.DecodeString(c.Value)
+	raw, err := base64.RawURLEncoding.DecodeString(c.Value)
 	if err != nil {
 		return ""
 	}
@@ -51,9 +62,9 @@ func (a *Affinity) FromRequest(r *http.Request) string {
 func (a *Affinity) SetCookie(w http.ResponseWriter, backendURL string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     a.cookieName,
-		Value:    base64.StdEncoding.EncodeToString([]byte(backendURL)),
+		Value:    base64.RawURLEncoding.EncodeToString([]byte(backendURL)),
 		Path:     "/",
-		MaxAge:   int(a.ttl.Seconds()),
+		MaxAge:   maxAge(a.ttl),
 		HttpOnly: true,
 		Secure:   a.secure,
 		SameSite: http.SameSiteLaxMode,

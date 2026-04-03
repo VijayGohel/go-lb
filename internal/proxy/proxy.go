@@ -193,9 +193,10 @@ func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Set sticky cookie before proxying, but only on the initial attempt
-	// to avoid duplicate Set-Cookie headers on error-handler retries.
-	if lb.sticky != nil && attempts == 0 {
+	// Set or update the sticky cookie so the response always reflects the
+	// backend that will actually serve this attempt. On retries the last
+	// Set-Cookie wins, ensuring affinity points to the final backend.
+	if lb.sticky != nil {
 		lb.sticky.SetCookie(w, peer.URL.String())
 	}
 

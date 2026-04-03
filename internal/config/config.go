@@ -430,7 +430,7 @@ func applyCLI(cfg *Config, args []string) error {
 		case "tls-key":
 			cfg.TLS.KeyFile = tlsKey
 		case "tls-min-version":
-			cfg.TLS.MinVersion = tlsMinVersion
+			cfg.TLS.MinVersion = strings.TrimSpace(tlsMinVersion)
 		case "sticky-enabled":
 			cfg.StickySession.Enabled = stickyEnabled
 		case "sticky-cookie-name":
@@ -439,5 +439,8 @@ func applyCLI(cfg *Config, args []string) error {
 			cfg.StickySession.TTL = stickyTTL
 		}
 	})
+	if v := cfg.TLS.MinVersion; v != "" && v != "1.2" && v != "1.3" {
+		return fmt.Errorf("invalid tls.min_version %q: must be \"1.2\" or \"1.3\"", v)
+	}
 	return nil
 }

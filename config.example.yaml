@@ -37,3 +37,14 @@ circuit_breaker:
   failure_threshold: 5         # consecutive failures before opening circuit
   success_threshold: 2         # consecutive successes in half-open to close
   timeout: 30s                 # how long to stay open before probing (half-open)
+
+tls:
+  enabled: false               # enable HTTPS frontend termination
+  cert_file: ""                # path to PEM certificate file
+  key_file: ""                 # path to PEM private key file
+  min_version: "1.2"           # minimum TLS version: "1.2" or "1.3"
+
+sticky_sessions:
+  enabled: false               # enable cookie-based session affinity
+  cookie_name: golb_backend    # name of the sticky session cookie
+  ttl: 1h                      # cookie TTL (e.g. 30m, 2h)

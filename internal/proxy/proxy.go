@@ -16,6 +16,7 @@ import (
 	"github.com/VijayGohel/go-lb/internal/circuitbreaker"
 	"github.com/VijayGohel/go-lb/internal/metrics"
 	"github.com/VijayGohel/go-lb/internal/pool"
+	"github.com/VijayGohel/go-lb/internal/sticky"
 )
 
 const (
@@ -48,12 +49,18 @@ func WithCircuitBreaker(r *circuitbreaker.Registry) Option {
 	return func(lb *LoadBalancer) { lb.cbRegistry = r }
 }
 
+// WithStickySession enables cookie-based session affinity on the LoadBalancer.
+func WithStickySession(a *sticky.Affinity) Option {
+	return func(lb *LoadBalancer) { lb.sticky = a }
+}
+
 // LoadBalancer routes requests across a pool of backends using the configured algorithm.
 // It implements http.Handler.
 type LoadBalancer struct {
 	pool       *pool.ServerPool
 	algo       algo.Algorithm
 	cbRegistry *circuitbreaker.Registry
+	sticky     *sticky.Affinity
 }
 
 // New creates a LoadBalancer backed by the given pool and algorithm.
@@ -154,7 +161,23 @@ func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	peer := lb.algo.Next(backends)
+	// Sticky session: try to route to the previously-pinned backend.
+	var peer *backend.Backend
+	if lb.sticky != nil {
+		if target := lb.sticky.FromRequest(r); target != "" {
+			for _, b := range backends {
+				if b.URL.String() == target && b.IsAlive() {
+					peer = b
+					break
+				}
+			}
+		}
+	}
+
+	// Fall through to algorithm selection if sticky miss or backend dead.
+	if peer == nil {
+		peer = lb.algo.Next(backends)
+	}
 	if peer == nil {
 		http.Error(w, "Service not available", http.StatusServiceUnavailable)
 		return
@@ -168,6 +191,12 @@ func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			lb.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
+	}
+
+	// Set sticky cookie before proxying, but only on the initial attempt
+	// to avoid duplicate Set-Cookie headers on error-handler retries.
+	if lb.sticky != nil && attempts == 0 {
+		lb.sticky.SetCookie(w, peer.URL.String())
 	}
 
 	peer.IncrConns()

@@ -1,6 +1,7 @@
 package proxy_test
 
 import (
+	"encoding/base64"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/VijayGohel/go-lb/internal/circuitbreaker"
 	"github.com/VijayGohel/go-lb/internal/pool"
 	"github.com/VijayGohel/go-lb/internal/proxy"
+	"github.com/VijayGohel/go-lb/internal/sticky"
 )
 
 func mustParseURL(raw string) *url.URL {
@@ -253,5 +255,196 @@ func TestLb_CircuitBreaker_SuccessClosesCircuit(t *testing.T) {
 	}
 	if cbReg.Get(srv.URL).State() != circuitbreaker.Closed {
 		t.Errorf("expected Closed after successful probe, got %s", cbReg.Get(srv.URL).State())
+	}
+}
+
+// --- Sticky session integration tests ---
+
+// newStickyLB wires backends into a pool with round-robin + sticky sessions.
+func newStickyLB(backends ...*backend.Backend) *proxy.LoadBalancer {
+	p := &pool.ServerPool{}
+	rr, _ := algo.New("round_robin")
+	sa := sticky.New("golb_backend", 1*time.Hour)
+	lb := proxy.New(p, rr, proxy.WithStickySession(sa))
+	for _, b := range backends {
+		lb.SetupProxy(b)
+		p.AddBackend(b)
+	}
+	return lb
+}
+
+func TestLb_StickyRouting_CookieRoutesToSameBackend(t *testing.T) {
+	var hits [2]int64
+	servers := make([]*httptest.Server, 2)
+	for i := range servers {
+		i := i
+		servers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt64(&hits[i], 1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer servers[i].Close()
+	}
+
+	lb := newStickyLB(
+		makeBackend(servers[0].URL, true),
+		makeBackend(servers[1].URL, true),
+	)
+
+	// First request: no cookie, algo picks a backend and sets cookie.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rw := httptest.NewRecorder()
+	lb.ServeHTTP(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("first request: expected 200, got %d", rw.Code)
+	}
+
+	// Extract the sticky cookie from the response.
+	var stickyCookie *http.Cookie
+	for _, c := range rw.Result().Cookies() {
+		if c.Name == "golb_backend" {
+			stickyCookie = c
+			break
+		}
+	}
+	if stickyCookie == nil {
+		t.Fatal("expected golb_backend cookie in response")
+	}
+
+	// Send 10 requests with the sticky cookie -- all should go to the same backend.
+	pinnedValue := stickyCookie.Value
+	for i := 0; i < 10; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(stickyCookie)
+		rw := httptest.NewRecorder()
+		lb.ServeHTTP(rw, req)
+		if rw.Code != http.StatusOK {
+			t.Errorf("sticky request %d: expected 200, got %d", i, rw.Code)
+		}
+		// Verify the response still sets the same cookie value.
+		for _, c := range rw.Result().Cookies() {
+			if c.Name == "golb_backend" && c.Value != pinnedValue {
+				t.Errorf("sticky request %d: cookie changed from %s to %s", i, pinnedValue, c.Value)
+			}
+		}
+	}
+}
+
+func TestLb_StickyFallback_DeadBackendFallsToAlgo(t *testing.T) {
+	alive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer alive.Close()
+
+	lb := newStickyLB(
+		makeBackend("http://localhost:19996", false), // dead backend
+		makeBackend(alive.URL, true),
+	)
+
+	// Send a request with a cookie pointing to the dead backend (base64-encoded with StdEncoding).
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	encodedDead := base64.StdEncoding.EncodeToString([]byte("http://localhost:19996"))
+	req.AddCookie(&http.Cookie{Name: "golb_backend", Value: encodedDead})
+	rw := httptest.NewRecorder()
+	lb.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusOK {
+		t.Errorf("expected 200 (fallback to alive backend), got %d", rw.Code)
+	}
+
+	// Verify cookie now points to the alive backend.
+	for _, c := range rw.Result().Cookies() {
+		if c.Name == "golb_backend" {
+			decoded, err := base64.StdEncoding.DecodeString(c.Value)
+			if err != nil {
+				t.Fatalf("cookie value not valid base64: %v", err)
+			}
+			if string(decoded) != alive.URL {
+				t.Errorf("expected cookie to be updated to alive backend %s, got %s", alive.URL, string(decoded))
+			}
+			return
+		}
+	}
+	t.Error("expected golb_backend cookie in response")
+}
+
+func TestLb_Sticky10Requests_SameBackend(t *testing.T) {
+	var hits [3]int64
+	servers := make([]*httptest.Server, 3)
+	for i := range servers {
+		i := i
+		servers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt64(&hits[i], 1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer servers[i].Close()
+	}
+
+	lb := newStickyLB(
+		makeBackend(servers[0].URL, true),
+		makeBackend(servers[1].URL, true),
+		makeBackend(servers[2].URL, true),
+	)
+
+	// First request to establish the sticky cookie.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rw := httptest.NewRecorder()
+	lb.ServeHTTP(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("first request: expected 200, got %d", rw.Code)
+	}
+
+	var stickyCookie *http.Cookie
+	for _, c := range rw.Result().Cookies() {
+		if c.Name == "golb_backend" {
+			stickyCookie = c
+			break
+		}
+	}
+	if stickyCookie == nil {
+		t.Fatal("expected golb_backend cookie in response")
+	}
+
+	// Determine which backend was chosen (decode base64 cookie value).
+	decodedPinned, err := base64.StdEncoding.DecodeString(stickyCookie.Value)
+	if err != nil {
+		t.Fatalf("cookie value not valid base64: %v", err)
+	}
+	pinnedURL := string(decodedPinned)
+	pinnedIdx := -1
+	for i, srv := range servers {
+		if srv.URL == pinnedURL {
+			pinnedIdx = i
+			break
+		}
+	}
+	if pinnedIdx == -1 {
+		t.Fatalf("pinned backend URL %q not found in backends", pinnedURL)
+	}
+
+	// Reset hits after the first request.
+	for i := range hits {
+		atomic.StoreInt64(&hits[i], 0)
+	}
+
+	// Send 10 more requests with the sticky cookie.
+	for i := 0; i < 10; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(stickyCookie)
+		rw := httptest.NewRecorder()
+		lb.ServeHTTP(rw, req)
+		if rw.Code != http.StatusOK {
+			t.Errorf("request %d: expected 200, got %d", i, rw.Code)
+		}
+	}
+
+	// All 10 requests should have gone to the pinned backend.
+	if atomic.LoadInt64(&hits[pinnedIdx]) != 10 {
+		t.Errorf("pinned backend (idx %d) got %d requests, want 10", pinnedIdx, hits[pinnedIdx])
+	}
+	// Other backends should have 0.
+	for i, h := range hits {
+		if i != pinnedIdx && atomic.LoadInt64(&h) != 0 {
+			t.Errorf("non-pinned backend (idx %d) got %d requests, want 0", i, h)
+		}
 	}
 }

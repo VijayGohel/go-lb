@@ -15,6 +15,7 @@ import (
 	"github.com/VijayGohel/go-lb/internal/admin"
 	"github.com/VijayGohel/go-lb/internal/algo"
 	"github.com/VijayGohel/go-lb/internal/backend"
+	"github.com/VijayGohel/go-lb/internal/circuitbreaker"
 	"github.com/VijayGohel/go-lb/internal/config"
 	"github.com/VijayGohel/go-lb/internal/health"
 	"github.com/VijayGohel/go-lb/internal/logger"
@@ -95,7 +96,22 @@ func main() {
 	}
 
 	p := &pool.ServerPool{}
-	lb := proxy.New(p, a)
+
+	var proxyOpts []proxy.Option
+	if cfg.CircuitBreaker.Enabled {
+		cbReg := circuitbreaker.NewRegistry(circuitbreaker.Config{
+			FailureThreshold: cfg.CircuitBreaker.FailureThreshold,
+			SuccessThreshold: cfg.CircuitBreaker.SuccessThreshold,
+			Timeout:          cfg.CircuitBreaker.Timeout,
+		})
+		proxyOpts = append(proxyOpts, proxy.WithCircuitBreaker(cbReg))
+		slog.Info("circuit breaker enabled",
+			"failure_threshold", cfg.CircuitBreaker.FailureThreshold,
+			"success_threshold", cfg.CircuitBreaker.SuccessThreshold,
+			"timeout", cfg.CircuitBreaker.Timeout,
+		)
+	}
+	lb := proxy.New(p, a, proxyOpts...)
 
 	for _, bc := range cfg.Pool.Backends {
 		u, err := url.Parse(bc.URL)

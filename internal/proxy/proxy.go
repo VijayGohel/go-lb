@@ -13,6 +13,7 @@ import (
 
 	"github.com/VijayGohel/go-lb/internal/algo"
 	"github.com/VijayGohel/go-lb/internal/backend"
+	"github.com/VijayGohel/go-lb/internal/circuitbreaker"
 	"github.com/VijayGohel/go-lb/internal/metrics"
 	"github.com/VijayGohel/go-lb/internal/pool"
 )
@@ -39,16 +40,29 @@ const (
 	requestIDKey                   // stable ID propagated across backend switches
 )
 
+// Option configures the LoadBalancer.
+type Option func(*LoadBalancer)
+
+// WithCircuitBreaker sets the circuit breaker registry on the LoadBalancer.
+func WithCircuitBreaker(r *circuitbreaker.Registry) Option {
+	return func(lb *LoadBalancer) { lb.cbRegistry = r }
+}
+
 // LoadBalancer routes requests across a pool of backends using the configured algorithm.
 // It implements http.Handler.
 type LoadBalancer struct {
-	pool *pool.ServerPool
-	algo algo.Algorithm
+	pool       *pool.ServerPool
+	algo       algo.Algorithm
+	cbRegistry *circuitbreaker.Registry
 }
 
 // New creates a LoadBalancer backed by the given pool and algorithm.
-func New(p *pool.ServerPool, a algo.Algorithm) *LoadBalancer {
-	return &LoadBalancer{pool: p, algo: a}
+func New(p *pool.ServerPool, a algo.Algorithm, opts ...Option) *LoadBalancer {
+	lb := &LoadBalancer{pool: p, algo: a}
+	for _, o := range opts {
+		o(lb)
+	}
+	return lb
 }
 
 func getAttemptsFromContext(r *http.Request) int {
@@ -98,6 +112,9 @@ func (lb *LoadBalancer) SetupProxy(b *backend.Backend) {
 			return
 		}
 		lb.pool.MarkBackendStatus(b.URL, false)
+		if lb.cbRegistry != nil {
+			lb.cbRegistry.Get(b.URL.String()).RecordFailure()
+		}
 		slog.Warn("backend_down", "backend", b.URL.String(), "error", e.Error())
 
 		attempts := getAttemptsFromContext(r)
@@ -121,10 +138,36 @@ func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Service not available", http.StatusServiceUnavailable)
 		return
 	}
-	peer := lb.algo.Next(lb.pool.Backends())
+	backends := lb.pool.Backends()
+
+	// Circuit breaker: filter out backends whose circuit is open before selection.
+	// Uses Eligible() which is non-mutating — does NOT consume the half-open probe permit.
+	if lb.cbRegistry != nil {
+		filtered := make([]*backend.Backend, 0, len(backends))
+		for _, b := range backends {
+			if lb.cbRegistry.Get(b.URL.String()).Eligible() {
+				filtered = append(filtered, b)
+			}
+		}
+		if len(filtered) > 0 {
+			backends = filtered
+		}
+	}
+
+	peer := lb.algo.Next(backends)
 	if peer == nil {
 		http.Error(w, "Service not available", http.StatusServiceUnavailable)
 		return
+	}
+
+	// Call Allow() only on the selected backend to properly consume the half-open permit.
+	if lb.cbRegistry != nil {
+		if !lb.cbRegistry.Get(peer.URL.String()).Allow() {
+			ctx := context.WithValue(r.Context(), attemptsKey, attempts+1)
+			ctx = context.WithValue(ctx, retryKey, 0)
+			lb.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
 	}
 
 	peer.IncrConns()
@@ -154,6 +197,13 @@ func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// recorded — so the outer frame must NOT double-count.
 	if getAttemptsFromContext(r) == attempts {
 		metrics.RecordRequest(peer.URL.String(), rw.statusCode, duration)
+		if lb.cbRegistry != nil {
+			if rw.statusCode >= 500 {
+				lb.cbRegistry.Get(peer.URL.String()).RecordFailure()
+			} else {
+				lb.cbRegistry.Get(peer.URL.String()).RecordSuccess()
+			}
+		}
 	}
 
 	slog.Info("request",

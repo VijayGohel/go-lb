@@ -31,3 +31,9 @@ rate_limit:
 metrics:
   enabled: true                # enable Prometheus metrics at /metrics
   port: 0                      # 0 = serve on admin port; set to expose on a dedicated port
+
+circuit_breaker:
+  enabled: false               # enable per-backend circuit breaker
+  failure_threshold: 5         # consecutive failures before opening circuit
+  success_threshold: 2         # consecutive successes in half-open to close
+  timeout: 30s                 # how long to stay open before probing (half-open)

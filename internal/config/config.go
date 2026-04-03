@@ -12,12 +12,13 @@ import (
 
 // Config is the resolved, merged configuration.
 type Config struct {
-	Server      ServerConfig
-	Pool        PoolConfig
-	HealthCheck HealthCheckConfig
-	Admin       AdminConfig
-	RateLimit   RateLimitConfig
-	Metrics     MetricsConfig
+	Server         ServerConfig
+	Pool           PoolConfig
+	HealthCheck    HealthCheckConfig
+	Admin          AdminConfig
+	RateLimit      RateLimitConfig
+	Metrics        MetricsConfig
+	CircuitBreaker CircuitBreakerConfig
 }
 
 type ServerConfig struct {
@@ -58,6 +59,13 @@ type MetricsConfig struct {
 	Port    int  `yaml:"port"`    // default 0 = use admin port
 }
 
+type CircuitBreakerConfig struct {
+	Enabled          bool          `yaml:"enabled"`           // default false
+	FailureThreshold int           `yaml:"failure_threshold"` // default 5
+	SuccessThreshold int           `yaml:"success_threshold"` // default 2
+	Timeout          time.Duration `yaml:"timeout"`           // default 30s
+}
+
 // Defaults returns a Config pre-filled with production defaults.
 func Defaults() Config {
 	return Config{
@@ -80,6 +88,12 @@ func Defaults() Config {
 		Metrics: MetricsConfig{
 			Enabled: true,
 			Port:    0,
+		},
+		CircuitBreaker: CircuitBreakerConfig{
+			Enabled:          false,
+			FailureThreshold: 5,
+			SuccessThreshold: 2,
+			Timeout:          30 * time.Second,
 		},
 	}
 }
@@ -118,6 +132,12 @@ type fileConfig struct {
 		Enabled *bool `yaml:"enabled"`
 		Port    *int  `yaml:"port"`
 	} `yaml:"metrics"`
+	CircuitBreaker struct {
+		Enabled          *bool  `yaml:"enabled"`
+		FailureThreshold int    `yaml:"failure_threshold"`
+		SuccessThreshold int    `yaml:"success_threshold"`
+		Timeout          string `yaml:"timeout"`
+	} `yaml:"circuit_breaker"`
 }
 
 // Load reads the YAML file at path (if non-empty), then applies CLI overrides.
@@ -141,6 +161,17 @@ func Load(path string, args []string) (Config, error) {
 
 	if err := applyCLI(&cfg, args); err != nil {
 		return Config{}, err
+	}
+	if cfg.CircuitBreaker.Enabled {
+		if cfg.CircuitBreaker.FailureThreshold <= 0 {
+			return Config{}, fmt.Errorf("invalid circuit_breaker.failure_threshold %d: must be > 0", cfg.CircuitBreaker.FailureThreshold)
+		}
+		if cfg.CircuitBreaker.SuccessThreshold <= 0 {
+			return Config{}, fmt.Errorf("invalid circuit_breaker.success_threshold %d: must be > 0", cfg.CircuitBreaker.SuccessThreshold)
+		}
+		if cfg.CircuitBreaker.Timeout <= 0 {
+			return Config{}, fmt.Errorf("invalid circuit_breaker.timeout %s: must be > 0", cfg.CircuitBreaker.Timeout)
+		}
 	}
 	return cfg, nil
 }
@@ -206,6 +237,22 @@ func applyFileConfig(cfg *Config, fc *fileConfig) error {
 	if fc.Metrics.Port != nil {
 		cfg.Metrics.Port = *fc.Metrics.Port
 	}
+	if fc.CircuitBreaker.Enabled != nil {
+		cfg.CircuitBreaker.Enabled = *fc.CircuitBreaker.Enabled
+	}
+	if fc.CircuitBreaker.FailureThreshold != 0 {
+		cfg.CircuitBreaker.FailureThreshold = fc.CircuitBreaker.FailureThreshold
+	}
+	if fc.CircuitBreaker.SuccessThreshold != 0 {
+		cfg.CircuitBreaker.SuccessThreshold = fc.CircuitBreaker.SuccessThreshold
+	}
+	if fc.CircuitBreaker.Timeout != "" {
+		d, err := time.ParseDuration(fc.CircuitBreaker.Timeout)
+		if err != nil {
+			return fmt.Errorf("invalid circuit_breaker.timeout %q: %w", fc.CircuitBreaker.Timeout, err)
+		}
+		cfg.CircuitBreaker.Timeout = d
+	}
 	return nil
 }
 
@@ -213,19 +260,23 @@ func applyCLI(cfg *Config, args []string) error {
 	fs := flag.NewFlagSet("golb", flag.ContinueOnError)
 
 	var (
-		port           int
-		backendsRaw    string
-		algorithm      string
-		healthPath     string
-		healthInterval time.Duration
-		healthTimeout  time.Duration
-		adminPort      int
-		rlEnabled      bool
-		rlRPS          float64
-		rlBurst        int
-		rlPerIP        bool
-		metricsEnabled bool
-		metricsPort    int
+		port               int
+		backendsRaw        string
+		algorithm          string
+		healthPath         string
+		healthInterval     time.Duration
+		healthTimeout      time.Duration
+		adminPort          int
+		rlEnabled          bool
+		rlRPS              float64
+		rlBurst            int
+		rlPerIP            bool
+		metricsEnabled     bool
+		metricsPort        int
+		cbEnabled          bool
+		cbFailureThreshold int
+		cbSuccessThreshold int
+		cbTimeout          time.Duration
 	)
 
 	fs.IntVar(&port, "port", 0, "Port to listen on")
@@ -241,6 +292,10 @@ func applyCLI(cfg *Config, args []string) error {
 	fs.BoolVar(&rlPerIP, "rl-per-ip", cfg.RateLimit.PerIP, "Rate limit: per-IP mode")
 	fs.BoolVar(&metricsEnabled, "metrics-enabled", cfg.Metrics.Enabled, "Enable Prometheus metrics")
 	fs.IntVar(&metricsPort, "metrics-port", cfg.Metrics.Port, "Dedicated metrics port (0=use admin port)")
+	fs.BoolVar(&cbEnabled, "cb-enabled", cfg.CircuitBreaker.Enabled, "Enable circuit breaker")
+	fs.IntVar(&cbFailureThreshold, "cb-failure-threshold", cfg.CircuitBreaker.FailureThreshold, "Circuit breaker failure threshold")
+	fs.IntVar(&cbSuccessThreshold, "cb-success-threshold", cfg.CircuitBreaker.SuccessThreshold, "Circuit breaker success threshold")
+	fs.DurationVar(&cbTimeout, "cb-timeout", cfg.CircuitBreaker.Timeout, "Circuit breaker open timeout")
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parsing CLI flags: %w", err)
@@ -280,6 +335,14 @@ func applyCLI(cfg *Config, args []string) error {
 			cfg.Metrics.Enabled = metricsEnabled
 		case "metrics-port":
 			cfg.Metrics.Port = metricsPort
+		case "cb-enabled":
+			cfg.CircuitBreaker.Enabled = cbEnabled
+		case "cb-failure-threshold":
+			cfg.CircuitBreaker.FailureThreshold = cbFailureThreshold
+		case "cb-success-threshold":
+			cfg.CircuitBreaker.SuccessThreshold = cbSuccessThreshold
+		case "cb-timeout":
+			cfg.CircuitBreaker.Timeout = cbTimeout
 		}
 	})
 	return nil

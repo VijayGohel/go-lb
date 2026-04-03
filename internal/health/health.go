@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/VijayGohel/go-lb/internal/backend"
+	"github.com/VijayGohel/go-lb/internal/metrics"
 	"github.com/VijayGohel/go-lb/internal/pool"
 )
 
@@ -104,6 +105,10 @@ func (hc *HealthChecker) recordSuccess(b *backend.Backend) {
 			b.SetAlive(true)
 			slog.Info("backend_up", "backend", key)
 		}
+		// Always emit the metric regardless of prior IsAlive value.
+		// This handles cases where the backend was already marked alive
+		// via another pathway (e.g. admin enable).
+		metrics.SetBackendUp(key, true)
 		hc.consecutive[key] = 0 // reset after threshold; also caps growth for always-healthy backends
 	}
 }
@@ -121,6 +126,10 @@ func (hc *HealthChecker) recordFailure(b *backend.Backend) {
 			b.SetAlive(false)
 			slog.Warn("backend_down", "backend", key, "error", "unhealthy threshold reached")
 		}
+		// Always emit the metric regardless of prior IsAlive value.
+		// This handles cases where the backend was already marked dead
+		// via another pathway (e.g. proxy error handler).
+		metrics.SetBackendUp(key, false)
 		hc.consecutive[key] = 0 // reset after threshold; also caps growth for always-failing backends
 	}
 }

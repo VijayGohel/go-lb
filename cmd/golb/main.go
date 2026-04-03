@@ -18,10 +18,12 @@ import (
 	"github.com/VijayGohel/go-lb/internal/config"
 	"github.com/VijayGohel/go-lb/internal/health"
 	"github.com/VijayGohel/go-lb/internal/logger"
+	"github.com/VijayGohel/go-lb/internal/metrics"
 	"github.com/VijayGohel/go-lb/internal/middleware"
 	"github.com/VijayGohel/go-lb/internal/pool"
 	"github.com/VijayGohel/go-lb/internal/proxy"
 	"github.com/VijayGohel/go-lb/internal/ratelimit"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // extractConfigFlag pulls --config / -config (both --config=path and --config path forms)
@@ -116,6 +118,21 @@ func main() {
 		slog.Info("registered backend", "url", u.String(), "weight", bc.Weight)
 	}
 
+	// Validate metrics endpoint availability.
+	if cfg.Metrics.Enabled && cfg.Metrics.Port == 0 && cfg.Admin.Port == 0 {
+		slog.Error("metrics enabled but no endpoint available: metrics.port and admin.port are both 0")
+		os.Exit(1)
+	}
+
+	// Initialize Prometheus metrics and emit initial backend_up=1 for all backends.
+	if cfg.Metrics.Enabled {
+		metrics.Init()
+		for _, b := range p.Backends() {
+			metrics.SetBackendUp(b.URL.String(), true)
+		}
+		slog.Info("prometheus metrics enabled")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -151,11 +168,37 @@ func main() {
 
 	var adminSrv *http.Server
 	if cfg.Admin.Port != 0 {
-		adminSrv = admin.New(p, lb).Start(fmt.Sprintf(":%d", cfg.Admin.Port))
+		adminMux := http.NewServeMux()
+		adminMux.Handle("/", admin.New(p, lb).Handler())
+		// Serve /metrics on the admin port when no dedicated metrics port is configured.
+		if cfg.Metrics.Enabled && cfg.Metrics.Port == 0 {
+			adminMux.Handle("/metrics", promhttp.Handler())
+		}
+		adminSrv = &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.Admin.Port),
+			Handler: adminMux,
+		}
 		go func() {
 			slog.Info("admin server started", "port", cfg.Admin.Port)
 			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Error("admin server error", "error", err)
+			}
+		}()
+	}
+
+	// Start a dedicated metrics server when a separate port is configured.
+	var metricsSrv *http.Server
+	if cfg.Metrics.Enabled && cfg.Metrics.Port != 0 {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", promhttp.Handler())
+		metricsSrv = &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.Metrics.Port),
+			Handler: metricsMux,
+		}
+		go func() {
+			slog.Info("metrics server started", "port", cfg.Metrics.Port)
+			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("metrics server error", "error", err)
 			}
 		}()
 	}
@@ -168,6 +211,11 @@ func main() {
 		cancel()
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer shutCancel()
+		if metricsSrv != nil {
+			if err := metricsSrv.Shutdown(shutCtx); err != nil {
+				slog.Error("metrics shutdown error", "error", err)
+			}
+		}
 		if adminSrv != nil {
 			if err := adminSrv.Shutdown(shutCtx); err != nil {
 				slog.Error("admin shutdown error", "error", err)

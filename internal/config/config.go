@@ -17,6 +17,7 @@ type Config struct {
 	HealthCheck HealthCheckConfig
 	Admin       AdminConfig
 	RateLimit   RateLimitConfig
+	Metrics     MetricsConfig
 }
 
 type ServerConfig struct {
@@ -52,6 +53,11 @@ type RateLimitConfig struct {
 	PerIP             bool    `yaml:"per_ip"`              // default true
 }
 
+type MetricsConfig struct {
+	Enabled bool `yaml:"enabled"` // default true
+	Port    int  `yaml:"port"`    // default 0 = use admin port
+}
+
 // Defaults returns a Config pre-filled with production defaults.
 func Defaults() Config {
 	return Config{
@@ -70,6 +76,10 @@ func Defaults() Config {
 			RequestsPerSecond: 1000,
 			Burst:             200,
 			PerIP:             true,
+		},
+		Metrics: MetricsConfig{
+			Enabled: true,
+			Port:    0,
 		},
 	}
 }
@@ -104,6 +114,10 @@ type fileConfig struct {
 		Burst             *int     `yaml:"burst"`
 		PerIP             *bool    `yaml:"per_ip"`
 	} `yaml:"rate_limit"`
+	Metrics struct {
+		Enabled *bool `yaml:"enabled"`
+		Port    *int  `yaml:"port"`
+	} `yaml:"metrics"`
 }
 
 // Load reads the YAML file at path (if non-empty), then applies CLI overrides.
@@ -186,6 +200,12 @@ func applyFileConfig(cfg *Config, fc *fileConfig) error {
 	if fc.RateLimit.PerIP != nil {
 		cfg.RateLimit.PerIP = *fc.RateLimit.PerIP
 	}
+	if fc.Metrics.Enabled != nil {
+		cfg.Metrics.Enabled = *fc.Metrics.Enabled
+	}
+	if fc.Metrics.Port != nil {
+		cfg.Metrics.Port = *fc.Metrics.Port
+	}
 	return nil
 }
 
@@ -204,6 +224,8 @@ func applyCLI(cfg *Config, args []string) error {
 		rlRPS          float64
 		rlBurst        int
 		rlPerIP        bool
+		metricsEnabled bool
+		metricsPort    int
 	)
 
 	fs.IntVar(&port, "port", 0, "Port to listen on")
@@ -217,6 +239,8 @@ func applyCLI(cfg *Config, args []string) error {
 	fs.Float64Var(&rlRPS, "rl-rps", cfg.RateLimit.RequestsPerSecond, "Rate limit: requests per second")
 	fs.IntVar(&rlBurst, "rl-burst", cfg.RateLimit.Burst, "Rate limit: burst size")
 	fs.BoolVar(&rlPerIP, "rl-per-ip", cfg.RateLimit.PerIP, "Rate limit: per-IP mode")
+	fs.BoolVar(&metricsEnabled, "metrics-enabled", cfg.Metrics.Enabled, "Enable Prometheus metrics")
+	fs.IntVar(&metricsPort, "metrics-port", cfg.Metrics.Port, "Dedicated metrics port (0=use admin port)")
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parsing CLI flags: %w", err)
@@ -252,6 +276,10 @@ func applyCLI(cfg *Config, args []string) error {
 			cfg.RateLimit.Burst = rlBurst
 		case "rl-per-ip":
 			cfg.RateLimit.PerIP = rlPerIP
+		case "metrics-enabled":
+			cfg.Metrics.Enabled = metricsEnabled
+		case "metrics-port":
+			cfg.Metrics.Port = metricsPort
 		}
 	})
 	return nil

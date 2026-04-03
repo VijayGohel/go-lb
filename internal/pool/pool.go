@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/VijayGohel/go-lb/internal/backend"
+	"github.com/VijayGohel/go-lb/internal/metrics"
 )
 
 // ServerPool holds registered backends, protected by an RWMutex.
@@ -50,12 +51,15 @@ func (s *ServerPool) Remove(rawURL string) bool {
 }
 
 // MarkBackendStatus finds a backend by URL and updates its alive state.
+// It also emits the backend_up metric so that ALL state-change paths
+// (health checker, proxy error handler, admin enable/disable) are covered.
 func (s *ServerPool) MarkBackendStatus(backendURL *url.URL, alive bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, b := range s.backends {
 		if b.URL.String() == backendURL.String() {
 			b.SetAlive(alive)
+			metrics.SetBackendUp(backendURL.String(), alive)
 			return
 		}
 	}

@@ -144,7 +144,8 @@ func (s *Server) setAlive(w http.ResponseWriter, r *http.Request, alive bool) {
 	}
 	for _, b := range s.pool.Backends() {
 		if b.URL.String() == rawURL {
-			b.SetAlive(alive)
+			// Use MarkBackendStatus so the metrics gauge is updated centrally.
+			s.pool.MarkBackendStatus(b.URL, alive)
 			writeJSON(w, http.StatusOK, backendStatus{
 				URL:         b.URL.String(),
 				Alive:       alive,

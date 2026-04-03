@@ -33,6 +33,13 @@ func (b *Backend) IsAlive() (alive bool) {
 	return
 }
 
+// SetWeight updates the backend weight thread-safely.
+func (b *Backend) SetWeight(w int) {
+	b.mux.Lock()
+	b.Weight = w
+	b.mux.Unlock()
+}
+
 // IncrConns atomically increments the active connection count.
 func (b *Backend) IncrConns() {
 	atomic.AddInt64(&b.activeConns, 1)

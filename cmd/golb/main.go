@@ -296,6 +296,14 @@ func main() {
 					slog.Error("config reload failed", "error", err)
 					continue
 				}
+				if len(newCfg.Pool.Backends) == 0 {
+					slog.Error("config reload rejected: no backends configured")
+					continue
+				}
+				if _, err := algo.New(newCfg.Pool.Algorithm); err != nil {
+					slog.Error("config reload rejected: invalid algorithm", "error", err)
+					continue
+				}
 				diff := reload.ComputeDiff(currentCfg, newCfg)
 				if err := applier.Apply(diff, newCfg); err != nil {
 					slog.Error("config apply failed", "error", err)

@@ -1,6 +1,7 @@
 package reload
 
 import (
+	"fmt"
 	"log/slog"
 	"net/url"
 
@@ -21,6 +22,7 @@ type Diff struct {
 	NewAlgorithm     string
 	HealthChanged    bool
 	NewHealthCheck   config.HealthCheckConfig
+	TLSChanged       bool
 }
 
 // Empty returns true when the diff contains no actionable changes.
@@ -29,7 +31,8 @@ func (d Diff) Empty() bool {
 		len(d.BackendsRemoved) == 0 &&
 		len(d.BackendsChanged) == 0 &&
 		!d.AlgorithmChanged &&
-		!d.HealthChanged
+		!d.HealthChanged &&
+		!d.TLSChanged
 }
 
 // ComputeDiff compares old and new configs and returns the differences.
@@ -81,6 +84,11 @@ func ComputeDiff(old, new config.Config) Diff {
 		d.NewHealthCheck = nh
 	}
 
+	// TLS change detection.
+	if old.TLS != new.TLS {
+		d.TLSChanged = true
+	}
+
 	return d
 }
 
@@ -99,11 +107,17 @@ func NewApplier(p *pool.ServerPool, lb *proxy.LoadBalancer, hc *health.HealthChe
 // Apply applies the diff to the running system. It returns an error if any
 // critical step fails (e.g. invalid backend URL, unknown algorithm).
 func (a *Applier) Apply(diff Diff, newCfg config.Config) error {
-	// Add new backends.
+	// Add new backends (same validation as startup).
 	for _, bc := range diff.BackendsAdded {
 		u, err := url.Parse(bc.URL)
 		if err != nil {
-			return err
+			return fmt.Errorf("reload: invalid backend URL %q: %w", bc.URL, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("reload: backend URL must use http or https scheme: %s", bc.URL)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("reload: backend URL must include a host: %s", bc.URL)
 		}
 		b := &backend.Backend{URL: u, Weight: bc.Weight}
 		a.proxy.SetupProxy(b)
@@ -118,11 +132,11 @@ func (a *Applier) Apply(diff Diff, newCfg config.Config) error {
 		slog.Info("reload: removed backend", "url", rawURL)
 	}
 
-	// Update changed backend weights.
+	// Update changed backend weights thread-safely.
 	for _, bc := range diff.BackendsChanged {
 		for _, b := range a.pool.Backends() {
 			if b.URL.String() == bc.URL {
-				b.Weight = bc.Weight
+				b.SetWeight(bc.Weight)
 				slog.Info("reload: updated backend weight", "url", bc.URL, "weight", bc.Weight)
 				break
 			}
@@ -150,9 +164,10 @@ func (a *Applier) Apply(diff Diff, newCfg config.Config) error {
 		)
 	}
 
-	// Warn about TLS changes (require restart).
-	// TLS is not yet in Config, but when it is, this is where we'd warn.
-	// Placeholder for future TLS support.
+	// TLS changes cannot be applied at runtime — warn the operator.
+	if diff.TLSChanged {
+		slog.Warn("reload: TLS configuration changes detected but require a full restart to take effect")
+	}
 
 	slog.Info("reload: complete",
 		"added", len(diff.BackendsAdded),

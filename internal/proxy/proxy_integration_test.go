@@ -73,8 +73,8 @@ func TestLb_Sticky_CircuitOpen_FallsBackToAlgo(t *testing.T) {
 	if rw.Code != http.StatusOK {
 		t.Errorf("expected 200 (fallback to alive), got %d", rw.Code)
 	}
-	if atomic.LoadInt64(&aliveHits) != 1 {
-		t.Errorf("expected alive backend to serve request, got %d hits", aliveHits)
+	if got := atomic.LoadInt64(&aliveHits); got != 1 {
+		t.Errorf("expected alive backend to serve request, got %d hits", got)
 	}
 }
 

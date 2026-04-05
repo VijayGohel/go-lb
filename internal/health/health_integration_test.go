@@ -118,10 +118,11 @@ func TestUpdateConfig_IntervalChangeIsPickedUp(t *testing.T) {
 
 // TestHealthChecker_ContinuesAfterBackendRemoval verifies that the health
 // checker does not panic, deadlock, or crash when a backend is removed from
-// the pool while health checking is active. This exercises the consecutive-map
-// pruning path and concurrent pool modification.
+// the pool while health checking is active.
 func TestHealthChecker_ContinuesAfterBackendRemoval(t *testing.T) {
+	var probeCount int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&probeCount, 1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -137,9 +138,9 @@ func TestHealthChecker_ContinuesAfterBackendRemoval(t *testing.T) {
 	defer cancel()
 	go hc.Start(ctx)
 
-	// Wait for health checks to accumulate state.
-	pollUntil(t, 2*time.Second, "at least one health check cycle", func() bool {
-		return b.IsAlive() // already alive, just wait for a tick
+	// Wait for at least one health check probe to actually fire.
+	pollUntil(t, 2*time.Second, "at least one health check probe", func() bool {
+		return atomic.LoadInt64(&probeCount) >= 1
 	})
 
 	// Remove backend from pool.

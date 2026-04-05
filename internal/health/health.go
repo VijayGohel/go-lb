@@ -72,13 +72,19 @@ func NewHealthChecker(p *pool.ServerPool, path string, interval, timeout time.Du
 
 // CheckBackend performs a single HTTP health probe and updates alive state via thresholds.
 func (hc *HealthChecker) CheckBackend(ctx context.Context, b *backend.Backend) {
-	target := b.URL.String() + hc.path
+	// Copy mutable config fields under lock to avoid races with UpdateConfig.
+	hc.mu.Lock()
+	path := hc.path
+	client := hc.client
+	hc.mu.Unlock()
+
+	target := b.URL.String() + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		hc.recordFailure(b)
 		return
 	}
-	resp, err := hc.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		hc.recordFailure(b)
 		return
@@ -134,9 +140,36 @@ func (hc *HealthChecker) recordFailure(b *backend.Backend) {
 	}
 }
 
+// UpdateConfig updates health check parameters at runtime (used by hot reload).
+func (hc *HealthChecker) UpdateConfig(path string, interval, timeout time.Duration, unhealthyThreshold, healthyThreshold int) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	hc.path = path
+	if interval > 0 {
+		hc.interval = interval
+	}
+	if timeout > 0 {
+		hc.timeout = timeout
+		hc.client = &http.Client{Timeout: timeout}
+	}
+	if unhealthyThreshold < 1 {
+		unhealthyThreshold = 1
+	}
+	if healthyThreshold < 1 {
+		healthyThreshold = 1
+	}
+	hc.unhealthyThreshold = unhealthyThreshold
+	hc.healthyThreshold = healthyThreshold
+}
+
 // Start runs health checks on all pool backends every interval until ctx is cancelled.
+// It picks up interval changes from UpdateConfig by resetting the ticker each loop.
 func (hc *HealthChecker) Start(ctx context.Context) {
-	ticker := time.NewTicker(hc.interval)
+	hc.mu.Lock()
+	currentInterval := hc.interval
+	hc.mu.Unlock()
+
+	ticker := time.NewTicker(currentInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -150,6 +183,24 @@ func (hc *HealthChecker) Start(ctx context.Context) {
 				}(b)
 			}
 			wg.Wait()
+
+			// Pick up interval changes from UpdateConfig.
+			hc.mu.Lock()
+			if hc.interval != currentInterval {
+				currentInterval = hc.interval
+				ticker.Reset(currentInterval)
+			}
+			// Prune stale consecutive entries for backends no longer in the pool.
+			activeURLs := make(map[string]bool, len(hc.pool.Backends()))
+			for _, b := range hc.pool.Backends() {
+				activeURLs[b.URL.String()] = true
+			}
+			for key := range hc.consecutive {
+				if !activeURLs[key] {
+					delete(hc.consecutive, key)
+				}
+			}
+			hc.mu.Unlock()
 		case <-ctx.Done():
 			return
 		}

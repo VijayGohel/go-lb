@@ -444,3 +444,11 @@ func applyCLI(cfg *Config, args []string) error {
 	}
 	return nil
 }
+
+// LoadFile reads the YAML config file at path and returns a Config with
+// defaults + file overrides + all validations applied. CLI overrides are
+// NOT applied — this is the reload path where the file is the source of truth.
+// It delegates to Load(path, nil) to share validation logic.
+func LoadFile(path string) (Config, error) {
+	return Load(path, nil)
+}

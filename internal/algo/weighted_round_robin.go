@@ -38,7 +38,7 @@ func (w *WeightedRoundRobin) Next(backends []*backend.Backend) *backend.Backend 
 		if !b.IsAlive() {
 			continue
 		}
-		weight := b.Weight
+		weight := b.GetWeight()
 		if weight <= 0 {
 			weight = 1
 		}

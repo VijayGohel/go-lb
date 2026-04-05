@@ -11,7 +11,7 @@ import (
 // Access alive status only through SetAlive/IsAlive — never read the field directly.
 type Backend struct {
 	URL          *url.URL
-	Weight       int
+	Weight       int // Use GetWeight/SetWeight for concurrent access during hot reload.
 	alive        bool
 	activeConns  int64
 	mux          sync.RWMutex
@@ -38,6 +38,14 @@ func (b *Backend) SetWeight(w int) {
 	b.mux.Lock()
 	b.Weight = w
 	b.mux.Unlock()
+}
+
+// GetWeight returns the backend weight thread-safely.
+func (b *Backend) GetWeight() int {
+	b.mux.RLock()
+	w := b.Weight
+	b.mux.RUnlock()
+	return w
 }
 
 // IncrConns atomically increments the active connection count.

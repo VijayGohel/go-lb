@@ -190,6 +190,16 @@ func (hc *HealthChecker) Start(ctx context.Context) {
 				currentInterval = hc.interval
 				ticker.Reset(currentInterval)
 			}
+			// Prune stale consecutive entries for backends no longer in the pool.
+			activeURLs := make(map[string]bool, len(hc.pool.Backends()))
+			for _, b := range hc.pool.Backends() {
+				activeURLs[b.URL.String()] = true
+			}
+			for key := range hc.consecutive {
+				if !activeURLs[key] {
+					delete(hc.consecutive, key)
+				}
+			}
 			hc.mu.Unlock()
 		case <-ctx.Done():
 			return

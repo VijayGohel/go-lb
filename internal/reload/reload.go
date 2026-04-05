@@ -9,6 +9,7 @@ import (
 	"github.com/VijayGohel/go-lb/internal/backend"
 	"github.com/VijayGohel/go-lb/internal/config"
 	"github.com/VijayGohel/go-lb/internal/health"
+	"github.com/VijayGohel/go-lb/internal/metrics"
 	"github.com/VijayGohel/go-lb/internal/pool"
 	"github.com/VijayGohel/go-lb/internal/proxy"
 )
@@ -104,10 +105,17 @@ func NewApplier(p *pool.ServerPool, lb *proxy.LoadBalancer, hc *health.HealthChe
 	return &Applier{pool: p, proxy: lb, health: hc}
 }
 
-// Apply applies the diff to the running system. It returns an error if any
-// critical step fails (e.g. invalid backend URL, unknown algorithm).
+// Apply applies the diff to the running system. It pre-validates all changes
+// before mutating any state, so invalid reloads don't partially apply.
 func (a *Applier) Apply(diff Diff, newCfg config.Config) error {
-	// Add new backends (same validation as startup).
+	// --- Pre-validation phase (no mutations) ---
+
+	// Validate all new backend URLs.
+	type parsedBackend struct {
+		url    *url.URL
+		weight int
+	}
+	var toAdd []parsedBackend
 	for _, bc := range diff.BackendsAdded {
 		u, err := url.Parse(bc.URL)
 		if err != nil {
@@ -119,36 +127,54 @@ func (a *Applier) Apply(diff Diff, newCfg config.Config) error {
 		if u.Host == "" {
 			return fmt.Errorf("reload: backend URL must include a host: %s", bc.URL)
 		}
-		b := &backend.Backend{URL: u, Weight: bc.Weight}
+		toAdd = append(toAdd, parsedBackend{url: u, weight: bc.Weight})
+	}
+
+	// Validate algorithm if changed.
+	var newAlgo algo.Algorithm
+	if diff.AlgorithmChanged {
+		var err error
+		newAlgo, err = algo.New(diff.NewAlgorithm)
+		if err != nil {
+			return fmt.Errorf("reload: %w", err)
+		}
+	}
+
+	// --- Mutation phase (all validated, safe to apply) ---
+
+	// Add new backends.
+	for i, bc := range diff.BackendsAdded {
+		b := &backend.Backend{URL: toAdd[i].url, Weight: toAdd[i].weight}
 		a.proxy.SetupProxy(b)
 		b.SetAlive(true)
 		a.pool.AddBackend(b)
+		metrics.SetBackendUp(bc.URL, true)
 		slog.Info("reload: added backend", "url", bc.URL, "weight", bc.Weight)
 	}
 
 	// Remove old backends.
 	for _, rawURL := range diff.BackendsRemoved {
 		a.pool.Remove(rawURL)
+		metrics.SetBackendUp(rawURL, false)
 		slog.Info("reload: removed backend", "url", rawURL)
 	}
 
-	// Update changed backend weights thread-safely.
-	for _, bc := range diff.BackendsChanged {
+	// Update changed backend weights (O(n+m) via map lookup).
+	if len(diff.BackendsChanged) > 0 {
+		byURL := make(map[string]*backend.Backend, len(a.pool.Backends()))
 		for _, b := range a.pool.Backends() {
-			if b.URL.String() == bc.URL {
+			byURL[b.URL.String()] = b
+		}
+		for _, bc := range diff.BackendsChanged {
+			if b, ok := byURL[bc.URL]; ok {
 				b.SetWeight(bc.Weight)
 				slog.Info("reload: updated backend weight", "url", bc.URL, "weight", bc.Weight)
-				break
 			}
 		}
 	}
 
 	// Swap algorithm if changed.
 	if diff.AlgorithmChanged {
-		newAlgo, err := algo.New(diff.NewAlgorithm)
-		if err != nil {
-			return err
-		}
 		a.proxy.SetAlgorithm(newAlgo)
 		slog.Info("reload: algorithm changed", "algorithm", diff.NewAlgorithm)
 	}

@@ -63,7 +63,7 @@ func (s *Server) listBackends(w http.ResponseWriter, r *http.Request) {
 		result[i] = backendStatus{
 			URL:         b.URL.String(),
 			Alive:       b.IsAlive(),
-			Weight:      b.Weight,
+			Weight:      b.GetWeight(),
 			ActiveConns: b.ActiveConns(),
 		}
 	}
@@ -111,7 +111,7 @@ func (s *Server) addBackend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, backendStatus{
 		URL:    b.URL.String(),
 		Alive:  true,
-		Weight: b.Weight,
+		Weight: b.GetWeight(),
 	})
 }
 
@@ -149,7 +149,7 @@ func (s *Server) setAlive(w http.ResponseWriter, r *http.Request, alive bool) {
 			writeJSON(w, http.StatusOK, backendStatus{
 				URL:         b.URL.String(),
 				Alive:       alive,
-				Weight:      b.Weight,
+				Weight:      b.GetWeight(),
 				ActiveConns: b.ActiveConns(),
 			})
 			return

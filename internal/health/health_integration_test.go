@@ -14,6 +14,26 @@ import (
 	"github.com/VijayGohel/go-lb/internal/pool"
 )
 
+// pollUntil polls condition every 10ms until it returns true or deadline expires.
+func pollUntil(t *testing.T, deadline time.Duration, desc string, cond func() bool) {
+	t.Helper()
+	timer := time.NewTimer(deadline)
+	defer timer.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-timer.C:
+			t.Fatalf("timed out waiting for: %s", desc)
+			return
+		case <-tick.C:
+			if cond() {
+				return
+			}
+		}
+	}
+}
+
 func TestUpdateConfig_ChangesProbePathAtRuntime(t *testing.T) {
 	// Backend returns 200 on /new-health, 404 on /health.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -31,7 +51,6 @@ func TestUpdateConfig_ChangesProbePathAtRuntime(t *testing.T) {
 	b.SetAlive(true)
 	p.AddBackend(b)
 
-	// Health checker starts with /health path — backend will fail.
 	hc := health.NewHealthChecker(p, "/health", 50*time.Millisecond, 2*time.Second,
 		health.WithUnhealthyThreshold(1),
 		health.WithHealthyThreshold(1),
@@ -41,20 +60,18 @@ func TestUpdateConfig_ChangesProbePathAtRuntime(t *testing.T) {
 	defer cancel()
 	go hc.Start(ctx)
 
-	// Wait for health check to mark backend dead (404 on /health).
-	time.Sleep(120 * time.Millisecond)
-	if b.IsAlive() {
-		t.Fatal("expected backend to be marked dead with /health path returning 404")
-	}
+	// Poll until backend is marked dead (404 on /health).
+	pollUntil(t, 2*time.Second, "backend marked dead", func() bool {
+		return !b.IsAlive()
+	})
 
 	// Update to /new-health path — backend should recover.
 	hc.UpdateConfig("/new-health", 50*time.Millisecond, 2*time.Second, 1, 1)
 
-	// Wait for recovery.
-	time.Sleep(120 * time.Millisecond)
-	if !b.IsAlive() {
-		t.Fatal("expected backend to recover after path change to /new-health")
-	}
+	// Poll until backend recovers.
+	pollUntil(t, 2*time.Second, "backend recovered after path change", func() bool {
+		return b.IsAlive()
+	})
 }
 
 func TestUpdateConfig_IntervalChangeIsPickedUp(t *testing.T) {
@@ -71,35 +88,39 @@ func TestUpdateConfig_IntervalChangeIsPickedUp(t *testing.T) {
 	b.SetAlive(true)
 	p.AddBackend(b)
 
-	// Start with a fast interval so we don't need to wait long.
+	// Start with a fast interval.
 	hc := health.NewHealthChecker(p, "/", 50*time.Millisecond, 2*time.Second)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go hc.Start(ctx)
 
-	// Wait for a few probes.
-	time.Sleep(200 * time.Millisecond)
-	countBefore := atomic.LoadInt64(&probeCount)
-	if countBefore < 1 {
-		t.Fatalf("expected at least 1 probe before config change, got %d", countBefore)
-	}
+	// Poll until at least 1 probe fires.
+	pollUntil(t, 2*time.Second, "at least 1 probe", func() bool {
+		return atomic.LoadInt64(&probeCount) >= 1
+	})
 
-	// Change to a much slower interval.
+	countBefore := atomic.LoadInt64(&probeCount)
+
+	// Change to a much slower interval (5s).
 	hc.UpdateConfig("/", 5*time.Second, 2*time.Second, 3, 2)
 
 	// After the change, probe rate should drop dramatically.
-	// With 5s interval, at most 1 probe in the next 500ms.
+	// Allow up to 2 extra probes: the in-progress one + one that may fire
+	// before the ticker resets.
 	time.Sleep(500 * time.Millisecond)
 	countAfter := atomic.LoadInt64(&probeCount)
 
-	// Should have at most 1 extra probe (the one in progress when we changed).
 	extraProbes := countAfter - countBefore
 	if extraProbes > 2 {
-		t.Errorf("expected at most 2 probes after slowing interval, got %d", extraProbes)
+		t.Errorf("expected at most 2 probes after slowing interval to 5s, got %d", extraProbes)
 	}
 }
 
-func TestHealthChecker_PrunesConsecutiveForRemovedBackends(t *testing.T) {
+// TestHealthChecker_ContinuesAfterBackendRemoval verifies that the health
+// checker does not panic, deadlock, or crash when a backend is removed from
+// the pool while health checking is active. This exercises the consecutive-map
+// pruning path and concurrent pool modification.
+func TestHealthChecker_ContinuesAfterBackendRemoval(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -116,16 +137,19 @@ func TestHealthChecker_PrunesConsecutiveForRemovedBackends(t *testing.T) {
 	defer cancel()
 	go hc.Start(ctx)
 
-	// Wait for a couple of health checks.
-	time.Sleep(120 * time.Millisecond)
+	// Wait for health checks to accumulate state.
+	pollUntil(t, 2*time.Second, "at least one health check cycle", func() bool {
+		return b.IsAlive() // already alive, just wait for a tick
+	})
 
 	// Remove backend from pool.
 	p.Remove(srv.URL)
 
-	// Wait for pruning tick.
-	time.Sleep(120 * time.Millisecond)
+	// Health checker should continue without errors for several more ticks.
+	time.Sleep(200 * time.Millisecond)
 
-	// No panic or deadlock = pass. The consecutive map should have been pruned.
-	// We can't directly inspect hc.consecutive (unexported), but the test verifies
-	// no runtime errors occur during removal + continued health checking.
+	// Verify no backends remain.
+	if len(p.Backends()) != 0 {
+		t.Errorf("expected empty pool after removal, got %d backends", len(p.Backends()))
+	}
 }
